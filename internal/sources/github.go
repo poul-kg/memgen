@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os/exec"
 	"strings"
 	"time"
@@ -135,6 +136,20 @@ type ghCommitAuthor struct {
 	Date  string `json:"date"`
 }
 
+// ValidateRepo checks that the configured repo exists and is accessible via gh CLI.
+func (g *GitHubClient) ValidateRepo() error {
+	log.Printf("GitHub: validating repo %s", g.Repo)
+	_, stderr, err := g.Executor.Execute("gh", "repo", "view", g.Repo, "--json", "name")
+	if err != nil {
+		if strings.Contains(stderr, "Could not resolve") || strings.Contains(stderr, "Not Found") || strings.Contains(stderr, "not found") {
+			return fmt.Errorf("GitHub repository %q not found. Check the x-mcp-repo header in your .mcp.json configuration", g.Repo)
+		}
+		return fmt.Errorf("failed to validate GitHub repo %q: %s", g.Repo, stderr)
+	}
+	log.Printf("GitHub: repo %s OK", g.Repo)
+	return nil
+}
+
 // ownerRepo splits the Repo field into owner and repo.
 func (g *GitHubClient) ownerRepo() (string, string) {
 	parts := strings.SplitN(g.Repo, "/", 2)
@@ -146,7 +161,7 @@ func (g *GitHubClient) ownerRepo() (string, string) {
 
 // FetchPRs finds all PRs (open, closed, merged) matching the ticket ID.
 func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
-	// List PRs matching the ticket ID.
+	log.Printf("GitHub: searching PRs for %s in %s", ticketID, g.Repo)
 	stdout, stderr, err := g.Executor.Execute("gh", "pr", "list",
 		"--repo", g.Repo,
 		"--search", ticketID,
@@ -155,6 +170,7 @@ func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
 		"--limit", "100",
 	)
 	if err != nil {
+		log.Printf("GitHub: PR search for %s FAILED: %v", ticketID, err)
 		return nil, fmt.Errorf("gh pr list failed: %w (stderr: %s)", err, stderr)
 	}
 
@@ -162,6 +178,7 @@ func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
 	if err := json.Unmarshal([]byte(stdout), &entries); err != nil {
 		return nil, fmt.Errorf("parsing gh pr list output: %w", err)
 	}
+	log.Printf("GitHub: found %d PRs for %s", len(entries), ticketID)
 
 	owner, repo := g.ownerRepo()
 	prs := make([]PR, 0, len(entries))
@@ -177,6 +194,8 @@ func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
 			UpdatedAt: e.UpdatedAt,
 			Branch:    e.HeadRefName,
 		}
+
+		log.Printf("GitHub: fetching details for PR #%d (%s)", e.Number, e.Title)
 
 		// Fetch reviews for each PR.
 		reviews, err := g.fetchReviews(owner, repo, e.Number)
@@ -198,6 +217,7 @@ func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
 			return nil, fmt.Errorf("fetching commits for PR #%d: %w", e.Number, err)
 		}
 		pr.Commits = commits
+		log.Printf("GitHub: PR #%d -> %d reviews, %d comments, %d commits", e.Number, len(reviews), len(comments), len(commits))
 
 		prs = append(prs, pr)
 	}
@@ -205,12 +225,24 @@ func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
 	return prs, nil
 }
 
-// FetchMainCommits finds commits on main branch containing the ticket ID.
+// FetchMainCommits finds commits on the default branch containing the ticket ID.
 func (g *GitHubClient) FetchMainCommits(ticketID string) ([]Commit, error) {
-	stdout, stderr, err := g.Executor.Execute("gh", "api",
-		fmt.Sprintf("repos/%s/commits?sha=main&per_page=100", g.Repo),
-	)
+	log.Printf("GitHub: fetching default branch commits for %s in %s", ticketID, g.Repo)
+
+	// Try common default branch names: main, then master.
+	var stdout, stderr string
+	var err error
+	for _, branch := range []string{"main", "master"} {
+		stdout, stderr, err = g.Executor.Execute("gh", "api",
+			fmt.Sprintf("repos/%s/commits?sha=%s&per_page=100", g.Repo, branch),
+		)
+		if err == nil {
+			log.Printf("GitHub: using branch %q for %s", branch, g.Repo)
+			break
+		}
+	}
 	if err != nil {
+		log.Printf("GitHub: fetch default branch commits FAILED: %v", err)
 		return nil, fmt.Errorf("gh api commits failed: %w (stderr: %s)", err, stderr)
 	}
 
@@ -219,7 +251,9 @@ func (g *GitHubClient) FetchMainCommits(ticketID string) ([]Commit, error) {
 		return nil, fmt.Errorf("parsing commits response: %w", err)
 	}
 
-	return filterCommitsByTicket(entries, ticketID), nil
+	result := filterCommitsByTicket(entries, ticketID)
+	log.Printf("GitHub: found %d/%d commits on main matching %s", len(result), len(entries), ticketID)
+	return result, nil
 }
 
 // FetchPRsSince finds PRs updated after the given timestamp.
@@ -242,12 +276,22 @@ func (g *GitHubClient) FetchPRsSince(ticketID string, since time.Time) ([]PR, er
 	return filtered, nil
 }
 
-// FetchMainCommitsSince finds commits on main after the given timestamp containing ticket ID.
+// FetchMainCommitsSince finds commits on the default branch after the given timestamp containing ticket ID.
 func (g *GitHubClient) FetchMainCommitsSince(ticketID string, since time.Time) ([]Commit, error) {
-	stdout, stderr, err := g.Executor.Execute("gh", "api",
-		fmt.Sprintf("repos/%s/commits?sha=main&per_page=100&since=%s", g.Repo, since.Format(time.RFC3339)),
-	)
+	log.Printf("GitHub: fetching default branch commits since %s for %s", since.Format(time.RFC3339), ticketID)
+
+	var stdout, stderr string
+	var err error
+	for _, branch := range []string{"main", "master"} {
+		stdout, stderr, err = g.Executor.Execute("gh", "api",
+			fmt.Sprintf("repos/%s/commits?sha=%s&per_page=100&since=%s", g.Repo, branch, since.Format(time.RFC3339)),
+		)
+		if err == nil {
+			break
+		}
+	}
 	if err != nil {
+		log.Printf("GitHub: fetch commits since FAILED: %v", err)
 		return nil, fmt.Errorf("gh api commits failed: %w (stderr: %s)", err, stderr)
 	}
 

@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"os/exec"
 )
 
@@ -85,10 +86,13 @@ RAW DATA:
 %s`, ticketID, branch, rawData)
 
 	args := c.baseArgs()
+	log.Printf("Claude: init knowledge for %s (input: %d bytes)", ticketID, len(prompt))
 	stdout, stderr, err := c.Executor.ExecuteWithStdin(prompt, "claude", args...)
 	if err != nil {
+		log.Printf("Claude: init knowledge FAILED: %v", err)
 		return "", fmt.Errorf("claude init-knowledge failed: %w\nstderr: %s", err, stderr)
 	}
+	log.Printf("Claude: init knowledge for %s OK (%d bytes output)", ticketID, len(stdout))
 	return stdout, nil
 }
 
@@ -112,10 +116,13 @@ NEW DECISIONS:
 %s`, currentUTCTime, existingKnowledge, newDecisions)
 
 	args := c.baseArgs()
+	log.Printf("Claude: merge decisions (input: %d bytes)", len(prompt))
 	stdout, stderr, err := c.Executor.ExecuteWithStdin(prompt, "claude", args...)
 	if err != nil {
+		log.Printf("Claude: merge decisions FAILED: %v", err)
 		return "", fmt.Errorf("claude merge-decisions failed: %w\nstderr: %s", err, stderr)
 	}
+	log.Printf("Claude: merge decisions OK (%d bytes output)", len(stdout))
 	return stdout, nil
 }
 
@@ -137,10 +144,13 @@ NEW DATA:
 %s`, currentUTCTime, existingKnowledge, newRawData)
 
 	args := c.baseArgs()
+	log.Printf("Claude: refresh knowledge (input: %d bytes)", len(prompt))
 	stdout, stderr, err := c.Executor.ExecuteWithStdin(prompt, "claude", args...)
 	if err != nil {
+		log.Printf("Claude: refresh knowledge FAILED: %v", err)
 		return "", fmt.Errorf("claude refresh-knowledge failed: %w\nstderr: %s", err, stderr)
 	}
+	log.Printf("Claude: refresh knowledge OK (%d bytes output)", len(stdout))
 	return stdout, nil
 }
 

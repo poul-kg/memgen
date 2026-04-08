@@ -174,10 +174,10 @@ func TestInit_JIRAFailure(t *testing.T) {
 	}
 }
 
-func TestInit_GitHubFailure_ContinuesWithJIRA(t *testing.T) {
+func TestInit_GitHubFailure_FailsEarly(t *testing.T) {
 	ticket := &jiraTestTicket{
 		Key:     "SV1-400",
-		Summary: "Test partial success",
+		Summary: "Test early failure",
 		Status:  "Open",
 	}
 	jiraServer := newJIRATestServer(t, "SV1-400", ticket, nil)
@@ -186,32 +186,26 @@ func TestInit_GitHubFailure_ContinuesWithJIRA(t *testing.T) {
 	// GitHub commands all fail.
 	ghExec := &MockGHExecutor{
 		Default: MockGHResponse{
-			Stderr: "gh: not authenticated",
+			Stderr: "gh: Could not resolve repo",
 			Err:    fmt.Errorf("exit status 1"),
 		},
 	}
 
-	claudeExec := &MockClaudeExecutor{
-		Response: "# SV1-400: Test partial success\n\n**Last Refreshed**: 2026-01-17T15:00:00Z",
-	}
+	claudeExec := &MockClaudeExecutor{}
 
 	deps := testDeps(t, jiraServer, ghExec, claudeExec, "org/repo")
 
-	result, err := Init(deps, "org/repo", "feature/SV1-400-work")
-	if err != nil {
-		t.Fatalf("Init should succeed with JIRA only, got error: %v", err)
+	_, err := Init(deps, "org/repo", "feature/SV1-400-work")
+	if err == nil {
+		t.Fatal("Init should fail when GitHub repo is not accessible")
 	}
 
-	// Should report 0 PRs and 0 commits since GitHub failed.
-	if !strings.Contains(result, "0 PRs") {
-		t.Errorf("result should mention 0 PRs, got: %s", result)
-	}
-	if !strings.Contains(result, "0 commits on main") {
-		t.Errorf("result should mention 0 commits, got: %s", result)
+	if !strings.Contains(err.Error(), "not found") && !strings.Contains(err.Error(), "GitHub") {
+		t.Errorf("error should mention GitHub repo issue, got: %v", err)
 	}
 
-	// File should still be written.
-	if !deps.Store.Exists("org/repo", "SV1-400") {
-		t.Error("knowledge file should exist even with GitHub failure")
+	// File should NOT be written.
+	if deps.Store.Exists("org/repo", "SV1-400") {
+		t.Error("knowledge file should not exist when init fails early")
 	}
 }

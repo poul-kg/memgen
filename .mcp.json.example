@@ -4,7 +4,7 @@
       "type": "http",
       "url": "http://your-memgen-host:3040/mcp",
       "headers": {
-        "x-mcp-repo": "your-org/your-repo"
+        "x-mcp-repo": "stitch-ai/stitch-mono"
       }
     }
   }

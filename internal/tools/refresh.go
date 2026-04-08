@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -22,12 +21,16 @@ func Refresh(deps *Deps, repo, branch string) (string, error) {
 		return "", fmt.Errorf("No knowledge file found for %s. Run memgen__init first.", ticketID)
 	}
 
-	// 3. Try lock.
+	// 3. Validate sources are accessible before doing any work.
+	if err := deps.GitHub.ValidateRepo(); err != nil {
+		return "", err
+	}
+
+	// 4. Try lock.
 	key := lockKey(repo, ticketID)
 	if !deps.Locks.TryLock(key) {
 		return "", fmt.Errorf("An operation is already in progress for %s. Try again later.", ticketID)
 	}
-	// 4. Defer unlock.
 	defer deps.Locks.Unlock(key)
 
 	// 5. Read existing knowledge, extract LastRefreshed timestamp.
@@ -45,20 +48,17 @@ func Refresh(deps *Deps, repo, branch string) (string, error) {
 	// 6. Fetch new data since that timestamp from all sources.
 	newComments, err := deps.JIRA.FetchCommentsSince(ticketID, since)
 	if err != nil {
-		log.Printf("Warning: failed to fetch new JIRA comments for %s: %v", ticketID, err)
-		newComments = nil
+		return "", fmt.Errorf("failed to fetch new JIRA comments for %s: %w", ticketID, err)
 	}
 
 	newPRs, err := deps.GitHub.FetchPRsSince(ticketID, since)
 	if err != nil {
-		log.Printf("Warning: failed to fetch new GitHub PRs for %s: %v", ticketID, err)
-		newPRs = nil
+		return "", fmt.Errorf("failed to fetch new GitHub PRs for %s: %w", ticketID, err)
 	}
 
 	newCommits, err := deps.GitHub.FetchMainCommitsSince(ticketID, since)
 	if err != nil {
-		log.Printf("Warning: failed to fetch new main commits for %s: %v", ticketID, err)
-		newCommits = nil
+		return "", fmt.Errorf("failed to fetch new main commits for %s: %w", ticketID, err)
 	}
 
 	// 7. If no new data, update the Last Refreshed line and return "Knowledge is up to date."

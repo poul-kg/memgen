@@ -217,9 +217,16 @@ func TestRefresh_LockContention(t *testing.T) {
 	// Pre-lock.
 	locks.TryLock(lockKey("org/repo", "SV1-240"))
 
+	ghExec := &MockGHExecutor{
+		Responses: map[string]MockGHResponse{
+			"gh repo view org/repo --json name": {Stdout: `{"name":"repo"}`},
+		},
+	}
+
 	deps := &Deps{
-		Store: store,
-		Locks: locks,
+		Store:  store,
+		Locks:  locks,
+		GitHub: &sources.GitHubClient{Repo: "org/repo", Executor: ghExec},
 	}
 
 	_, err := Refresh(deps, "org/repo", "feature/SV1-240-work")

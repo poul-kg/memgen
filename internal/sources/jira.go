@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -95,6 +96,7 @@ func (c *JIRAClient) FetchTicket(ticketID string) (*JIRATicket, error) {
 
 	// Fetch the issue with rendered fields.
 	issueURL := fmt.Sprintf("%s/rest/api/3/issue/%s?expand=renderedFields", c.BaseURL, ticketID)
+	log.Printf("JIRA: fetching ticket %s -> %s", ticketID, issueURL)
 	issueReq, err := http.NewRequest("GET", issueURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating issue request: %w", err)
@@ -103,9 +105,11 @@ func (c *JIRAClient) FetchTicket(ticketID string) (*JIRATicket, error) {
 
 	issueResp, err := httpClient.Do(issueReq)
 	if err != nil {
+		log.Printf("JIRA: fetch ticket %s FAILED: %v", ticketID, err)
 		return nil, fmt.Errorf("fetching JIRA issue: %w", err)
 	}
 	defer func() { _ = issueResp.Body.Close() }()
+	log.Printf("JIRA: fetch ticket %s -> %d", ticketID, issueResp.StatusCode)
 
 	issueBody, err := io.ReadAll(issueResp.Body)
 	if err != nil {
@@ -196,6 +200,7 @@ func (c *JIRAClient) FetchCommentsSince(ticketID string, since time.Time) ([]JIR
 // fetchAllComments retrieves all comments for a ticket.
 func (c *JIRAClient) fetchAllComments(httpClient *http.Client, ticketID string) ([]JIRAComment, error) {
 	commentsURL := fmt.Sprintf("%s/rest/api/3/issue/%s/comment?orderBy=created", c.BaseURL, ticketID)
+	log.Printf("JIRA: fetching comments for %s -> %s", ticketID, commentsURL)
 	commentsReq, err := http.NewRequest("GET", commentsURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating comments request: %w", err)
@@ -204,9 +209,11 @@ func (c *JIRAClient) fetchAllComments(httpClient *http.Client, ticketID string) 
 
 	commentsResp, err := httpClient.Do(commentsReq)
 	if err != nil {
+		log.Printf("JIRA: fetch comments %s FAILED: %v", ticketID, err)
 		return nil, fmt.Errorf("fetching JIRA comments: %w", err)
 	}
 	defer func() { _ = commentsResp.Body.Close() }()
+	log.Printf("JIRA: fetch comments %s -> %d", ticketID, commentsResp.StatusCode)
 
 	commentsBody, err := io.ReadAll(commentsResp.Body)
 	if err != nil {

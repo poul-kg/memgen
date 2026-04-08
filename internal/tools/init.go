@@ -2,7 +2,6 @@ package tools
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/poul-kg/memgen/internal/ticket"
 )
@@ -15,33 +14,39 @@ func Init(deps *Deps, repo, branch string) (string, error) {
 		return "", err
 	}
 
-	// 2. Try to acquire lock.
+	// 2. Validate sources are accessible before doing any work.
+	if err := deps.GitHub.ValidateRepo(); err != nil {
+		return "", err
+	}
+	if _, err := deps.JIRA.FetchTicket(ticketID); err != nil {
+		browseURL := ticket.BrowseURL(deps.JIRABaseURL, ticketID)
+		return "", fmt.Errorf("failed to fetch JIRA ticket %s (browse: %s): %w", ticketID, browseURL, err)
+	}
+
+	// 3. Try to acquire lock.
 	key := lockKey(repo, ticketID)
 	if !deps.Locks.TryLock(key) {
 		return "", fmt.Errorf("An operation is already in progress for %s. Try again later.", ticketID)
 	}
-	// 3. Defer unlock.
 	defer deps.Locks.Unlock(key)
 
-	// 4. Fetch JIRA ticket.
+	// 4. Fetch JIRA ticket (already validated, fetch again for data).
 	jiraTicket, err := deps.JIRA.FetchTicket(ticketID)
 	if err != nil {
 		browseURL := ticket.BrowseURL(deps.JIRABaseURL, ticketID)
 		return "", fmt.Errorf("failed to fetch JIRA ticket %s (browse: %s): %w", ticketID, browseURL, err)
 	}
 
-	// 5. Fetch GitHub PRs (log warning but continue if fails).
+	// 5. Fetch GitHub PRs.
 	prs, err := deps.GitHub.FetchPRs(ticketID)
 	if err != nil {
-		log.Printf("Warning: failed to fetch GitHub PRs for %s: %v", ticketID, err)
-		prs = nil
+		return "", fmt.Errorf("failed to fetch GitHub PRs for %s: %w", ticketID, err)
 	}
 
-	// 6. Fetch main branch commits (log warning but continue if fails).
+	// 6. Fetch main branch commits.
 	mainCommits, err := deps.GitHub.FetchMainCommits(ticketID)
 	if err != nil {
-		log.Printf("Warning: failed to fetch main branch commits for %s: %v", ticketID, err)
-		mainCommits = nil
+		return "", fmt.Errorf("failed to fetch main branch commits for %s: %w", ticketID, err)
 	}
 
 	// 7. Format all raw data.
