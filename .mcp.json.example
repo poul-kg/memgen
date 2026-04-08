@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "memgen": {
+      "type": "http",
+      "url": "http://your-memgen-host:3040/mcp",
+      "headers": {
+        "x-mcp-repo": "your-org/your-repo"
+      }
+    }
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "expand": "renderedFields,names,schema,operations,editmeta,changelog,versionedRepresentations",
+  "id": "10042",
+  "self": "https://stitchai.atlassian.net/rest/api/3/issue/10042",
+  "key": "STITCH-1234",
+  "renderedFields": {
+    "description": "<p>As a user, I want to be able to reset my password via email so that I can regain access to my account if I forget my credentials.</p>\n<h3>Acceptance Criteria</h3>\n<ul>\n<li>User receives a password reset email within 60 seconds</li>\n<li>Reset link expires after 24 hours</li>\n<li>User cannot reuse last 5 passwords</li>\n<li>Failed reset attempts are logged for security audit</li>\n</ul>\n<h3>Technical Notes</h3>\n<p>Use the existing email service. Token should be a signed JWT with 24h expiry. Store password history hashes in the <code>password_history</code> table.</p>",
+    "comment": {
+      "comments": []
+    },
+    "created": "8/Apr/26 9:15 AM",
+    "updated": "8/Apr/26 2:30 PM"
+  },
+  "fields": {
+    "summary": "Implement password reset flow via email",
+    "description": {
+      "version": 1,
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "content": [
+            {
+              "type": "text",
+              "text": "As a user, I want to be able to reset my password via email so that I can regain access to my account if I forget my credentials."
+            }
+          ]
+        }
+      ]
+    },
+    "status": {
+      "self": "https://stitchai.atlassian.net/rest/api/3/status/10001",
+      "description": "",
+      "iconUrl": "https://stitchai.atlassian.net/",
+      "name": "In Progress",
+      "id": "10001",
+      "statusCategory": {
+        "self": "https://stitchai.atlassian.net/rest/api/3/statuscategory/4",
+        "id": 4,
+        "key": "indeterminate",
+        "colorName": "blue",
+        "name": "In Progress"
+      }
+    },
+    "priority": {
+      "self": "https://stitchai.atlassian.net/rest/api/3/priority/2",
+      "iconUrl": "https://stitchai.atlassian.net/images/icons/priorities/high.svg",
+      "name": "High",
+      "id": "2"
+    },
+    "assignee": {
+      "self": "https://stitchai.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede21g",
+      "accountId": "5b10a2844c20165700ede21g",
+      "emailAddress": "alice@stitchai.com",
+      "displayName": "Alice Chen",
+      "active": true,
+      "timeZone": "America/New_York"
+    },
+    "reporter": {
+      "self": "https://stitchai.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede22h",
+      "accountId": "5b10a2844c20165700ede22h",
+      "emailAddress": "bob@stitchai.com",
+      "displayName": "Bob Martinez",
+      "active": true,
+      "timeZone": "America/Los_Angeles"
+    },
+    "labels": [
+      "security",
+      "user-auth",
+      "backend"
+    ],
+    "comment": {
+      "comments": [],
+      "maxResults": 0,
+      "total": 0,
+      "startAt": 0
+    },
+    "created": "2026-04-01T09:15:00.000-0400",
+    "updated": "2026-04-08T14:30:00.000-0400",
+    "issuetype": {
+      "self": "https://stitchai.atlassian.net/rest/api/3/issuetype/10001",
+      "id": "10001",
+      "description": "A user story",
+      "iconUrl": "https://stitchai.atlassian.net/rest/api/2/universal_avatar/view/type/issuetype/avatar/10315?size=medium",
+      "name": "Story",
+      "subtask": false
+    }
+  }
+}

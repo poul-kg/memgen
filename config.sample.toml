@@ -1,0 +1,7 @@
+[server]
+port = 3040
+
+[jira]
+url = "https://your-company.atlassian.net"
+email = "user@example.com"
+token = "your-jira-api-token"

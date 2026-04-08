@@ -1,0 +1,119 @@
+{
+  "startAt": 0,
+  "maxResults": 50,
+  "total": 4,
+  "comments": [
+    {
+      "self": "https://stitchai.atlassian.net/rest/api/3/issue/10042/comment/10100",
+      "id": "10100",
+      "author": {
+        "self": "https://stitchai.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede22h",
+        "accountId": "5b10a2844c20165700ede22h",
+        "displayName": "Bob Martinez",
+        "active": true
+      },
+      "body": {
+        "version": 1,
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Alice, for the JWT token, should we use HS256 or RS256? We currently use HS256 for session tokens but RS256 might be better for password reset since we can verify without the signing key."
+              }
+            ]
+          }
+        ]
+      },
+      "renderedBody": "<p>Alice, for the JWT token, should we use HS256 or RS256? We currently use HS256 for session tokens but RS256 might be better for password reset since we can verify without the signing key.</p>",
+      "created": "2026-04-02T10:30:00.000-0400",
+      "updated": "2026-04-02T10:30:00.000-0400"
+    },
+    {
+      "self": "https://stitchai.atlassian.net/rest/api/3/issue/10042/comment/10101",
+      "id": "10101",
+      "author": {
+        "self": "https://stitchai.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede21g",
+        "accountId": "5b10a2844c20165700ede21g",
+        "displayName": "Alice Chen",
+        "active": true
+      },
+      "body": {
+        "version": 1,
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Good point. Let's go with RS256. I'll generate a dedicated key pair for password reset tokens. The public key can be shared with the email verification microservice without exposing our signing capability."
+              }
+            ]
+          }
+        ]
+      },
+      "renderedBody": "<p>Good point. Let&#39;s go with RS256. I&#39;ll generate a dedicated key pair for password reset tokens. The public key can be shared with the email verification microservice without exposing our signing capability.</p>",
+      "created": "2026-04-02T11:15:00.000-0400",
+      "updated": "2026-04-02T11:15:00.000-0400"
+    },
+    {
+      "self": "https://stitchai.atlassian.net/rest/api/3/issue/10042/comment/10102",
+      "id": "10102",
+      "author": {
+        "self": "https://stitchai.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede23i",
+        "accountId": "5b10a2844c20165700ede23i",
+        "displayName": "Carol Nguyen",
+        "active": true
+      },
+      "body": {
+        "version": 1,
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Security review note: Make sure we rate-limit password reset requests to prevent enumeration attacks. Suggest max 3 requests per email per hour. Also, the reset email should not confirm whether the email exists in our system - always show the same success message."
+              }
+            ]
+          }
+        ]
+      },
+      "renderedBody": "<p>Security review note: Make sure we rate-limit password reset requests to prevent enumeration attacks. Suggest max 3 requests per email per hour. Also, the reset email should not confirm whether the email exists in our system - always show the same success message.</p>",
+      "created": "2026-04-05T09:00:00.000-0400",
+      "updated": "2026-04-05T14:22:00.000-0400"
+    },
+    {
+      "self": "https://stitchai.atlassian.net/rest/api/3/issue/10042/comment/10103",
+      "id": "10103",
+      "author": {
+        "self": "https://stitchai.atlassian.net/rest/api/3/user?accountId=5b10a2844c20165700ede21g",
+        "accountId": "5b10a2844c20165700ede21g",
+        "displayName": "Alice Chen",
+        "active": true
+      },
+      "body": {
+        "version": 1,
+        "type": "doc",
+        "content": [
+          {
+            "type": "paragraph",
+            "content": [
+              {
+                "type": "text",
+                "text": "Good catch Carol. I've added rate limiting to the design doc. Will implement using our Redis-backed rate limiter with a sliding window of 1 hour and max 3 attempts per email. The endpoint will always return 200 regardless of whether the email exists."
+              }
+            ]
+          }
+        ]
+      },
+      "renderedBody": "<p>Good catch Carol. I&#39;ve added rate limiting to the design doc. Will implement using our Redis-backed rate limiter with a sliding window of 1 hour and max 3 attempts per email. The endpoint will always return 200 regardless of whether the email exists.</p>",
+      "created": "2026-04-05T16:45:00.000-0400",
+      "updated": "2026-04-05T16:45:00.000-0400"
+    }
+  ]
+}
