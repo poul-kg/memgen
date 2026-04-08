@@ -541,7 +541,61 @@ The README must include:
 
 ---
 
-## 14. Non-Goals (Explicitly Out of Scope)
+## 14. Testing Requirements
+
+**Test coverage is mandatory.** Every package must have meaningful test coverage. Tests are not optional or deferred — they are part of the implementation. A feature is not complete until its tests pass.
+
+### Testing Strategy
+
+#### Unit Tests
+
+Every package in `internal/` must have corresponding `_test.go` files.
+
+| Package | What to Test |
+|---------|-------------|
+| `config` | TOML parsing: valid config, missing fields, placeholder detection, malformed TOML, missing file, directory creation logic. |
+| `ticket` | Branch-to-ticket extraction: standard patterns, bare ticket, no match, multiple matches (first wins), edge cases (lowercase, special chars). JIRA validation: successful lookup, 404 response, API error, timeout. |
+| `knowledge/store` | File read/write, path resolution from repo+ticket, missing directory creation, file-not-found behavior, correct UTF-8 handling. |
+| `knowledge/lock` | Lock acquisition, non-blocking tryLock returns immediately when held, lock release, concurrent access from multiple goroutines. |
+| `sources/jira` | JIRA API response parsing: ticket details, comments, empty comments, pagination if applicable. Error cases: auth failure, network error, malformed JSON. Use `httptest.Server` to mock JIRA API responses. |
+| `sources/github` | `gh` CLI command construction: correct arguments for PR search, commit search, review comments. Parse `gh` JSON output. Test with mock command execution (inject a test executor instead of calling real `gh`). |
+| `claude/cli` | Command construction: correct flags (`--model`, `--print`, etc.), stdin piping. Test with mock command execution. Verify prompts contain required instructions for init/set/refresh/merge scenarios. |
+| `tools/init` | Full init flow with mocked sources and mocked Claude CLI. Verify: lock acquired, sources fetched, Claude invoked, file written, lock released. Error propagation when JIRA fails, when GitHub fails, when Claude fails. |
+| `tools/get` | File exists: returns content + staleness info. File missing: returns init recommendation. Staleness threshold calculation. |
+| `tools/set` | File exists: reads old, invokes Claude merge, writes result. File missing: returns error. Lock contention: returns "try again later." Deduplication: Claude reports no changes. |
+| `tools/refresh` | Timestamp-based filtering of new data. Merge with existing knowledge. No new data case. File missing case. |
+| `server` | MCP protocol handling: valid tool calls, missing headers, missing arguments, unknown tools. Header extraction middleware. |
+
+#### Integration Tests
+
+Place in `internal/integration/` or as build-tagged files (`//go:build integration`).
+
+| Test | What It Covers |
+|------|---------------|
+| Config round-trip | Write TOML, load it, verify all fields populated. |
+| Knowledge file lifecycle | `init` -> `get` -> `set` -> `get` -> `refresh` -> `get` full cycle using mocked external sources but real file I/O. |
+| Concurrent lock behavior | Multiple goroutines attempting `init` and `set` on the same ticket simultaneously — verify only one proceeds, others get "try again later." |
+| HTTP server end-to-end | Start real HTTP server, send MCP requests with headers and arguments, verify correct tool dispatch and response format. |
+
+#### What to Mock
+
+- **JIRA API**: Use `httptest.NewServer` to return canned JSON responses. Never call real JIRA in tests.
+- **`gh` CLI**: Inject a command executor interface. In tests, provide a mock that returns canned stdout/stderr. Never call real `gh` in tests.
+- **`claude` CLI**: Same as `gh` — inject a command executor interface with canned responses. Never call real `claude` in tests.
+- **Filesystem** (optional): Unit tests for knowledge store can use `os.MkdirTemp` for isolated temporary directories. Clean up with `t.Cleanup`.
+
+#### Test Conventions
+
+- Use table-driven tests where multiple inputs map to expected outputs.
+- Use `t.Parallel()` where tests are independent.
+- Use `testdata/` directories for fixture files (sample JIRA responses, knowledge files, etc.).
+- Test error messages — verify they contain the expected actionable information (ticket ID, URLs, instructions).
+- No test should depend on network access, installed CLIs, or external state.
+- Run all tests with `go test ./...`. Integration tests gated behind `//go:build integration` tag, run with `go test -tags=integration ./...`.
+
+---
+
+## 15. Non-Goals (Explicitly Out of Scope)
 
 - Authentication / authorization
 - TLS termination
