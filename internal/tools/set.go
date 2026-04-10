@@ -2,12 +2,13 @@ package tools
 
 import (
 	"fmt"
-	"strings"
 	"time"
+
+	"github.com/poul-kg/memgen/internal/knowledge"
 )
 
-// Set merges new decisions into an existing knowledge file.
-func Set(deps *Deps, repo, branch, decisions string) (string, error) {
+// Set appends a note to an existing knowledge file.
+func Set(deps *Deps, repo, branch, note string) (string, error) {
 	// 1. Extract ticket ID.
 	ticketID, err := extractTicket(branch)
 	if err != nil {
@@ -24,32 +25,25 @@ func Set(deps *Deps, repo, branch, decisions string) (string, error) {
 	if !deps.Locks.TryLock(key) {
 		return "", fmt.Errorf("An operation is already in progress for %s. Try again later.", ticketID)
 	}
-	// 4. Defer unlock.
 	defer deps.Locks.Unlock(key)
 
-	// 5. Read existing knowledge.
-	existing, err := deps.Store.Read(repo, ticketID)
+	// 4. Read existing knowledge as struct.
+	kf, err := deps.Store.ReadKnowledge(repo, ticketID)
 	if err != nil {
 		return "", fmt.Errorf("failed to read knowledge file for %s: %w", ticketID, err)
 	}
 
-	// 6. Call Claude MergeDecisions with current UTC time.
-	currentTime := time.Now().UTC().Format(time.RFC3339)
-	result, err := deps.Claude.MergeDecisions(existing, decisions, currentTime)
-	if err != nil {
-		return "", fmt.Errorf("failed to merge decisions via Claude: %w", err)
+	// 5. Append note.
+	kf.Notes = append(kf.Notes, knowledge.Note{
+		Date: time.Now().UTC(),
+		Body: note,
+	})
+
+	// 6. Write back.
+	if err := deps.Store.WriteKnowledge(repo, ticketID, kf); err != nil {
+		return "", fmt.Errorf("failed to write knowledge file: %w", err)
 	}
 
-	// 7. If result is "no changes needed", return that.
-	if strings.TrimSpace(result) == "no changes needed" {
-		return "no changes needed", nil
-	}
-
-	// 8. Write merged result.
-	if err := deps.Store.Write(repo, ticketID, result); err != nil {
-		return "", fmt.Errorf("failed to write updated knowledge file: %w", err)
-	}
-
-	// 9. Return success summary.
-	return fmt.Sprintf("Updated decisions for %s.", ticketID), nil
+	// 7. Return success.
+	return fmt.Sprintf("Added note for %s.", ticketID), nil
 }

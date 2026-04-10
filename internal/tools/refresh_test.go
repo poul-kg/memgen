@@ -6,12 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/poul-kg/memgen/internal/claude"
 	"github.com/poul-kg/memgen/internal/knowledge"
 	"github.com/poul-kg/memgen/internal/sources"
 )
 
-func makeRefreshDeps(t *testing.T, store *knowledge.Store, jiraServer *httptest.Server, ghExec *MockGHExecutor, claudeExec *MockClaudeExecutor) *Deps {
+func makeRefreshDeps(t *testing.T, store *knowledge.Store, jiraServer *httptest.Server, ghExec *MockGHExecutor) *Deps {
 	t.Helper()
 	deps := &Deps{
 		Store: store,
@@ -27,18 +26,13 @@ func makeRefreshDeps(t *testing.T, store *knowledge.Store, jiraServer *httptest.
 		deps.JIRABaseURL = jiraServer.URL
 	}
 	if ghExec != nil {
-		deps.GitHub = &sources.GitHubClient{
-			Repo:     "org/repo",
-			Executor: ghExec,
-		}
-	}
-	if claudeExec != nil {
-		deps.Claude = &claude.CLI{Executor: claudeExec}
+		deps.GitHubExecutor = ghExec
 	}
 	return deps
 }
 
 func TestRefresh_NewDataAvailable(t *testing.T) {
+	t.Parallel()
 	ticket := &jiraTestTicket{
 		Key:     "SV1-240",
 		Summary: "Feature X",
@@ -89,21 +83,31 @@ func TestRefresh_NewDataAvailable(t *testing.T) {
 		},
 	}
 
-	claudeExec := &MockClaudeExecutor{
-		Response: "# SV1-240: Feature X\n\n**Last Refreshed**: 2026-04-08T14:00:00Z\n\n## Decisions\n- Existing decision\n\n## New data integrated",
-	}
-
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
-	// Write existing knowledge with a Last Refreshed timestamp.
-	lastRefreshed := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
-	existingContent := "# SV1-240: Feature X\n\n**Last Refreshed**: " + lastRefreshed + "\n\n## Decisions\n- Existing decision"
-	if err := store.Write("org/repo", "SV1-240", existingContent); err != nil {
+	// Write existing knowledge YAML with some notes.
+	existingKF := &knowledge.KnowledgeFile{
+		TicketID:      "SV1-240",
+		Branch:        "feature/SV1-240-work",
+		LastRefreshed: time.Now().UTC().Add(-2 * time.Hour),
+		JIRA: knowledge.JIRASection{
+			Summary:  "Feature X (old)",
+			Status:   "Open",
+			Labels:   []string{},
+			Comments: []knowledge.JIRAComment{},
+		},
+		PullRequests: []knowledge.PullRequest{},
+		MainCommits:  []knowledge.CommitEntry{},
+		Notes: []knowledge.Note{
+			{Date: time.Now().UTC().Add(-1 * time.Hour), Body: "Existing decision"},
+		},
+	}
+	if err := store.WriteKnowledge("org/repo", "SV1-240", existingKF); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	deps := makeRefreshDeps(t, store, jiraServer, ghExec, claudeExec)
+	deps := makeRefreshDeps(t, store, jiraServer, ghExec)
 
 	result, err := Refresh(deps, "org/repo", "feature/SV1-240-work")
 	if err != nil {
@@ -115,27 +119,48 @@ func TestRefresh_NewDataAvailable(t *testing.T) {
 		t.Errorf("result should mention refreshed knowledge, got: %s", result)
 	}
 
-	// Verify file was updated.
-	content, err := store.Read("org/repo", "SV1-240")
+	// Verify YAML was updated with fresh data.
+	kf, err := store.ReadKnowledge("org/repo", "SV1-240")
 	if err != nil {
 		t.Fatalf("failed to read updated file: %v", err)
 	}
-	if !strings.Contains(content, "New data integrated") {
-		t.Errorf("updated content should contain Claude's output, got: %s", content)
+
+	// JIRA data should be refreshed.
+	if kf.JIRA.Summary != "Feature X" {
+		t.Errorf("JIRA.Summary = %q, want %q", kf.JIRA.Summary, "Feature X")
+	}
+	if kf.JIRA.Status != "In Progress" {
+		t.Errorf("JIRA.Status = %q, want %q", kf.JIRA.Status, "In Progress")
 	}
 
-	// Verify Claude was called with existing knowledge and new raw data.
-	if len(claudeExec.Calls) != 1 {
-		t.Fatalf("expected 1 Claude call, got %d", len(claudeExec.Calls))
+	// PRs should be refreshed.
+	if len(kf.PullRequests) != 1 {
+		t.Fatalf("expected 1 PR, got %d", len(kf.PullRequests))
 	}
-	stdin := claudeExec.Calls[0].Stdin
-	if !strings.Contains(stdin, "Existing decision") {
-		t.Error("Claude stdin should contain existing knowledge")
+	if kf.PullRequests[0].Number != 102 {
+		t.Errorf("PR Number = %d, want 102", kf.PullRequests[0].Number)
+	}
+
+	// Main commits should be refreshed.
+	if len(kf.MainCommits) != 1 {
+		t.Fatalf("expected 1 main commit, got %d", len(kf.MainCommits))
+	}
+	if kf.MainCommits[0].SHA != "def567890abcdef" {
+		t.Errorf("commit SHA = %q, want %q", kf.MainCommits[0].SHA, "def567890abcdef")
+	}
+
+	// Notes should be PRESERVED from the existing file.
+	if len(kf.Notes) != 1 {
+		t.Fatalf("expected 1 note (preserved), got %d", len(kf.Notes))
+	}
+	if kf.Notes[0].Body != "Existing decision" {
+		t.Errorf("note body = %q, want %q", kf.Notes[0].Body, "Existing decision")
 	}
 }
 
 func TestRefresh_NoNewData(t *testing.T) {
-	// JIRA returns no comments since last refresh, GitHub returns empty.
+	t.Parallel()
+	// JIRA returns ticket data, GitHub returns empty PRs and no matching commits.
 	jiraServer := newJIRATestServer(t, "SV1-240", &jiraTestTicket{Key: "SV1-240", Summary: "X", Status: "Open"}, nil)
 	defer jiraServer.Close()
 
@@ -149,41 +174,48 @@ func TestRefresh_NoNewData(t *testing.T) {
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
-	lastRefreshed := time.Now().UTC().Add(-1 * time.Hour).Format(time.RFC3339)
-	existingContent := "# SV1-240: Feature X\n\n**Last Refreshed**: " + lastRefreshed + "\n\n## Decisions\n"
-	if err := store.Write("org/repo", "SV1-240", existingContent); err != nil {
+	existingKF := &knowledge.KnowledgeFile{
+		TicketID:      "SV1-240",
+		Branch:        "feature/SV1-240-work",
+		LastRefreshed: time.Now().UTC().Add(-1 * time.Hour),
+		JIRA: knowledge.JIRASection{
+			Summary:  "X",
+			Status:   "Open",
+			Labels:   []string{},
+			Comments: []knowledge.JIRAComment{},
+		},
+		PullRequests: []knowledge.PullRequest{},
+		MainCommits:  []knowledge.CommitEntry{},
+		Notes:        []knowledge.Note{},
+	}
+	if err := store.WriteKnowledge("org/repo", "SV1-240", existingKF); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	claudeExec := &MockClaudeExecutor{}
-	deps := makeRefreshDeps(t, store, jiraServer, ghExec, claudeExec)
+	deps := makeRefreshDeps(t, store, jiraServer, ghExec)
 
 	result, err := Refresh(deps, "org/repo", "feature/SV1-240-work")
 	if err != nil {
 		t.Fatalf("Refresh returned error: %v", err)
 	}
 
-	if result != "Knowledge is up to date." {
-		t.Errorf("result should be 'Knowledge is up to date.', got: %s", result)
+	// Even with no new data, a full refresh still rebuilds the file.
+	if !strings.Contains(result, "Refreshed knowledge for SV1-240") {
+		t.Errorf("result should mention refreshed knowledge, got: %s", result)
 	}
 
-	// Verify Claude was NOT called (no new data to process).
-	if len(claudeExec.Calls) != 0 {
-		t.Errorf("expected 0 Claude calls when no new data, got %d", len(claudeExec.Calls))
-	}
-
-	// Verify the Last Refreshed timestamp was updated in the file.
-	content, err := store.Read("org/repo", "SV1-240")
+	// Verify file is valid YAML.
+	kf, err := store.ReadKnowledge("org/repo", "SV1-240")
 	if err != nil {
 		t.Fatalf("failed to read file: %v", err)
 	}
-	updatedTime := store.LastRefreshed(content)
-	if updatedTime.IsZero() {
-		t.Error("Last Refreshed timestamp should be present after refresh")
+	if kf.LastRefreshed.IsZero() {
+		t.Error("LastRefreshed should be set after refresh")
 	}
 }
 
 func TestRefresh_FileMissing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
@@ -205,12 +237,24 @@ func TestRefresh_FileMissing(t *testing.T) {
 }
 
 func TestRefresh_LockContention(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 	locks := knowledge.NewLockManager()
 
-	existingContent := "# SV1-240: Feature X\n\n## Decisions\n"
-	if err := store.Write("org/repo", "SV1-240", existingContent); err != nil {
+	existingKF := &knowledge.KnowledgeFile{
+		TicketID:      "SV1-240",
+		Branch:        "feature/SV1-240-work",
+		LastRefreshed: time.Now().UTC(),
+		JIRA: knowledge.JIRASection{
+			Labels:   []string{},
+			Comments: []knowledge.JIRAComment{},
+		},
+		PullRequests: []knowledge.PullRequest{},
+		MainCommits:  []knowledge.CommitEntry{},
+		Notes:        []knowledge.Note{},
+	}
+	if err := store.WriteKnowledge("org/repo", "SV1-240", existingKF); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
@@ -224,9 +268,9 @@ func TestRefresh_LockContention(t *testing.T) {
 	}
 
 	deps := &Deps{
-		Store:  store,
-		Locks:  locks,
-		GitHub: &sources.GitHubClient{Repo: "org/repo", Executor: ghExec},
+		Store:          store,
+		Locks:          locks,
+		GitHubExecutor: ghExec,
 	}
 
 	_, err := Refresh(deps, "org/repo", "feature/SV1-240-work")

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -288,7 +289,7 @@ func TestFetchTicket_ServerError(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 500 response")
 	}
-	if got := err.Error(); !contains(got, "500") {
+	if got := err.Error(); !strings.Contains(got, "500") {
 		t.Errorf("expected error to contain status code 500, got: %s", got)
 	}
 }
@@ -391,16 +392,3 @@ func TestJIRACommentParsing(t *testing.T) {
 	}
 }
 
-// contains is a test helper that checks if a string contains a substring.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsImpl(s, substr))
-}
-
-func containsImpl(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

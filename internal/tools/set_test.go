@@ -5,101 +5,117 @@ import (
 	"testing"
 	"time"
 
-	"github.com/poul-kg/memgen/internal/claude"
 	"github.com/poul-kg/memgen/internal/knowledge"
 )
 
-func TestSet_SuccessfulMerge(t *testing.T) {
+func TestSet_AppendsNote(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
-	// Write an existing knowledge file.
-	existingContent := "# SV1-240: Feature X\n\n**Last Refreshed**: " + time.Now().UTC().Format(time.RFC3339) + "\n\n## Decisions\n"
-	if err := store.Write("org/repo", "SV1-240", existingContent); err != nil {
+	// Write an existing YAML knowledge file.
+	kf := &knowledge.KnowledgeFile{
+		TicketID:      "SV1-240",
+		Branch:        "feature/SV1-240-work",
+		LastRefreshed: time.Now().UTC(),
+		JIRA: knowledge.JIRASection{
+			Summary:  "Feature X",
+			Status:   "In Progress",
+			Labels:   []string{},
+			Comments: []knowledge.JIRAComment{},
+		},
+		PullRequests: []knowledge.PullRequest{},
+		MainCommits:  []knowledge.CommitEntry{},
+		Notes:        []knowledge.Note{},
+	}
+	if err := store.WriteKnowledge("org/repo", "SV1-240", kf); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	claudeExec := &MockClaudeExecutor{
-		Response: "# SV1-240: Feature X\n\n**Last Refreshed**: 2026-04-08T12:00:00Z\n\n## Decisions\n- Use PostgreSQL for storage (2026-04-08T12:00:00Z)",
-	}
-
 	deps := &Deps{
-		Store:  store,
-		Locks:  knowledge.NewLockManager(),
-		Claude: &claude.CLI{Executor: claudeExec},
+		Store: store,
+		Locks: knowledge.NewLockManager(),
 	}
 
+	before := time.Now().UTC()
 	result, err := Set(deps, "org/repo", "feature/SV1-240-work", "Use PostgreSQL for storage")
 	if err != nil {
 		t.Fatalf("Set returned error: %v", err)
 	}
 
 	// Verify success message.
-	if !strings.Contains(result, "Updated decisions for SV1-240") {
-		t.Errorf("result should mention updated decisions, got: %s", result)
+	if !strings.Contains(result, "Added note for SV1-240") {
+		t.Errorf("result should mention added note, got: %s", result)
 	}
 
-	// Verify file was updated.
-	content, err := store.Read("org/repo", "SV1-240")
+	// Verify note was appended by reading back.
+	updated, err := store.ReadKnowledge("org/repo", "SV1-240")
 	if err != nil {
 		t.Fatalf("failed to read updated file: %v", err)
 	}
-	if !strings.Contains(content, "PostgreSQL") {
-		t.Errorf("updated content should contain new decision, got: %s", content)
+	if len(updated.Notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(updated.Notes))
 	}
-
-	// Verify Claude received the correct input.
-	if len(claudeExec.Calls) != 1 {
-		t.Fatalf("expected 1 Claude call, got %d", len(claudeExec.Calls))
+	if updated.Notes[0].Body != "Use PostgreSQL for storage" {
+		t.Errorf("note body = %q, want %q", updated.Notes[0].Body, "Use PostgreSQL for storage")
 	}
-	stdin := claudeExec.Calls[0].Stdin
-	if !strings.Contains(stdin, existingContent) {
-		t.Error("Claude stdin should contain existing knowledge")
-	}
-	if !strings.Contains(stdin, "Use PostgreSQL for storage") {
-		t.Error("Claude stdin should contain new decisions")
+	if updated.Notes[0].Date.Before(before) {
+		t.Errorf("note date should be recent, got: %v", updated.Notes[0].Date)
 	}
 }
 
-func TestSet_NoChangesNeeded(t *testing.T) {
+func TestSet_AppendsMultipleNotes(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
-	existingContent := "# SV1-240: Feature X\n\n## Decisions\n- Use PostgreSQL"
-	if err := store.Write("org/repo", "SV1-240", existingContent); err != nil {
+	// Write an existing YAML knowledge file with one note.
+	kf := &knowledge.KnowledgeFile{
+		TicketID:      "SV1-240",
+		Branch:        "feature/SV1-240-work",
+		LastRefreshed: time.Now().UTC(),
+		JIRA: knowledge.JIRASection{
+			Summary:  "Feature X",
+			Labels:   []string{},
+			Comments: []knowledge.JIRAComment{},
+		},
+		PullRequests: []knowledge.PullRequest{},
+		MainCommits:  []knowledge.CommitEntry{},
+		Notes: []knowledge.Note{
+			{Date: time.Now().UTC().Add(-1 * time.Hour), Body: "First note"},
+		},
+	}
+	if err := store.WriteKnowledge("org/repo", "SV1-240", kf); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
-	claudeExec := &MockClaudeExecutor{
-		Response: "no changes needed",
-	}
-
 	deps := &Deps{
-		Store:  store,
-		Locks:  knowledge.NewLockManager(),
-		Claude: &claude.CLI{Executor: claudeExec},
+		Store: store,
+		Locks: knowledge.NewLockManager(),
 	}
 
-	result, err := Set(deps, "org/repo", "feature/SV1-240-work", "Use PostgreSQL")
+	_, err := Set(deps, "org/repo", "feature/SV1-240-work", "Second note")
 	if err != nil {
 		t.Fatalf("Set returned error: %v", err)
 	}
 
-	if result != "no changes needed" {
-		t.Errorf("result should be 'no changes needed', got: %s", result)
-	}
-
-	// Verify file was NOT updated (still has original content).
-	content, err := store.Read("org/repo", "SV1-240")
+	updated, err := store.ReadKnowledge("org/repo", "SV1-240")
 	if err != nil {
-		t.Fatalf("failed to read file: %v", err)
+		t.Fatalf("failed to read updated file: %v", err)
 	}
-	if content != existingContent {
-		t.Errorf("file should not have been modified")
+	if len(updated.Notes) != 2 {
+		t.Fatalf("expected 2 notes, got %d", len(updated.Notes))
+	}
+	if updated.Notes[0].Body != "First note" {
+		t.Errorf("first note body = %q, want %q", updated.Notes[0].Body, "First note")
+	}
+	if updated.Notes[1].Body != "Second note" {
+		t.Errorf("second note body = %q, want %q", updated.Notes[1].Body, "Second note")
 	}
 }
 
 func TestSet_FileMissing(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
@@ -108,7 +124,7 @@ func TestSet_FileMissing(t *testing.T) {
 		Locks: knowledge.NewLockManager(),
 	}
 
-	_, err := Set(deps, "org/repo", "feature/SV1-240-work", "some decisions")
+	_, err := Set(deps, "org/repo", "feature/SV1-240-work", "some note")
 	if err == nil {
 		t.Fatal("expected error when file doesn't exist")
 	}
@@ -121,12 +137,24 @@ func TestSet_FileMissing(t *testing.T) {
 }
 
 func TestSet_LockContention(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 	locks := knowledge.NewLockManager()
 
-	existingContent := "# SV1-240: Feature X\n\n## Decisions\n"
-	if err := store.Write("org/repo", "SV1-240", existingContent); err != nil {
+	kf := &knowledge.KnowledgeFile{
+		TicketID:      "SV1-240",
+		Branch:        "feature/SV1-240-work",
+		LastRefreshed: time.Now().UTC(),
+		JIRA: knowledge.JIRASection{
+			Labels:   []string{},
+			Comments: []knowledge.JIRAComment{},
+		},
+		PullRequests: []knowledge.PullRequest{},
+		MainCommits:  []knowledge.CommitEntry{},
+		Notes:        []knowledge.Note{},
+	}
+	if err := store.WriteKnowledge("org/repo", "SV1-240", kf); err != nil {
 		t.Fatalf("failed to write test file: %v", err)
 	}
 
@@ -138,7 +166,7 @@ func TestSet_LockContention(t *testing.T) {
 		Locks: locks,
 	}
 
-	_, err := Set(deps, "org/repo", "feature/SV1-240-work", "some decisions")
+	_, err := Set(deps, "org/repo", "feature/SV1-240-work", "some note")
 	if err == nil {
 		t.Fatal("expected error due to lock contention")
 	}
@@ -148,6 +176,7 @@ func TestSet_LockContention(t *testing.T) {
 }
 
 func TestSet_NoTicketInBranch(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	store := knowledge.NewStore(tmpDir)
 
@@ -156,7 +185,7 @@ func TestSet_NoTicketInBranch(t *testing.T) {
 		Locks: knowledge.NewLockManager(),
 	}
 
-	_, err := Set(deps, "org/repo", "main", "some decisions")
+	_, err := Set(deps, "org/repo", "main", "some note")
 	if err == nil {
 		t.Fatal("expected error for branch without ticket")
 	}

@@ -1,0 +1,19 @@
+services:
+  memgen:
+    container_name: memgen
+    build: .
+    user: "${UID:-1000}:${GID:-1000}"
+    ports:
+      - "3040:3040"
+    volumes:
+      # Mount host's gh auth
+      - ${HOME}/.config/gh:/home/memgen/.config/gh:ro
+      # Mount host's claude CLI versions directory
+      - ${HOME}/.local/share/claude:/home/memgen/.local/share/claude:ro
+      # Mount host's claude auth/config
+      - ${HOME}/.claude:/home/memgen/.claude
+      - ${HOME}/.claude.json:/home/memgen/.claude.json:ro
+      # Mount memgen config and knowledge storage
+      - ${HOME}/.config/memgen:/home/memgen/.config/memgen
+    environment:
+      - HOME=/home/memgen

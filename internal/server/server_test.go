@@ -3,10 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/poul-kg/memgen/internal/claude"
 	"github.com/poul-kg/memgen/internal/knowledge"
 	"github.com/poul-kg/memgen/internal/sources"
 	"github.com/poul-kg/memgen/internal/tools"
@@ -14,16 +14,16 @@ import (
 
 func testDeps() *tools.Deps {
 	return &tools.Deps{
-		Store:       knowledge.NewStore("/tmp/memgen-test-knowledge"),
-		Locks:       knowledge.NewLockManager(),
-		JIRA:        &sources.JIRAClient{BaseURL: "https://test.atlassian.net", Email: "test@test.com", Token: "tok"},
-		GitHub:      &sources.GitHubClient{Repo: "owner/repo", Executor: &sources.DefaultExecutor{}},
-		Claude:      claude.NewCLI(),
-		JIRABaseURL: "https://test.atlassian.net",
+		Store:          knowledge.NewStore("/tmp/memgen-test-knowledge"),
+		Locks:          knowledge.NewLockManager(),
+		JIRA:           &sources.JIRAClient{BaseURL: "https://test.atlassian.net", Email: "test@test.com", Token: "tok"},
+		GitHubExecutor: &sources.DefaultExecutor{},
+		JIRABaseURL:    "https://test.atlassian.net",
 	}
 }
 
 func TestNew_RegistersFourTools(t *testing.T) {
+	t.Parallel()
 	deps := testDeps()
 	s := New(deps)
 	if s == nil {
@@ -58,13 +58,14 @@ func TestNew_RegistersFourTools(t *testing.T) {
 	resultStr := string(resultBytes)
 	expectedTools := []string{"memgen__init", "memgen__get", "memgen__set", "memgen__refresh"}
 	for _, name := range expectedTools {
-		if !contains(resultStr, name) {
+		if !strings.Contains(resultStr, name) {
 			t.Errorf("expected tool %q in tools/list response, got: %s", name, resultStr)
 		}
 	}
 }
 
 func TestRepoFromContext_WithValue(t *testing.T) {
+	t.Parallel()
 	ctx := context.WithValue(context.Background(), repoContextKey, "owner/repo")
 	repo, err := repoFromContext(ctx)
 	if err != nil {
@@ -76,6 +77,7 @@ func TestRepoFromContext_WithValue(t *testing.T) {
 }
 
 func TestRepoFromContext_WithoutValue(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	_, err := repoFromContext(ctx)
 	if err == nil {
@@ -84,6 +86,7 @@ func TestRepoFromContext_WithoutValue(t *testing.T) {
 }
 
 func TestRepoFromContext_EmptyString(t *testing.T) {
+	t.Parallel()
 	ctx := context.WithValue(context.Background(), repoContextKey, "")
 	_, err := repoFromContext(ctx)
 	if err == nil {
@@ -92,6 +95,7 @@ func TestRepoFromContext_EmptyString(t *testing.T) {
 }
 
 func TestTextResult(t *testing.T) {
+	t.Parallel()
 	result := textResult("hello world")
 	if result.IsError {
 		t.Error("expected IsError to be false")
@@ -112,6 +116,7 @@ func TestTextResult(t *testing.T) {
 }
 
 func TestErrorResult(t *testing.T) {
+	t.Parallel()
 	result := errorResult("something failed")
 	if !result.IsError {
 		t.Error("expected IsError to be true")
@@ -131,15 +136,3 @@ func TestErrorResult(t *testing.T) {
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchString(s, substr)
-}
-
-func searchString(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}

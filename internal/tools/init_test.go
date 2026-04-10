@@ -7,6 +7,7 @@ import (
 )
 
 func TestInit_Success(t *testing.T) {
+	t.Parallel()
 	ticket := &jiraTestTicket{
 		Key:         "SV1-240",
 		Summary:     "Implement feature X",
@@ -64,11 +65,7 @@ func TestInit_Success(t *testing.T) {
 		},
 	}
 
-	claudeExec := &MockClaudeExecutor{
-		Response: "# SV1-240: Implement feature X\n\n**Last Refreshed**: 2026-01-17T15:00:00Z\n\n## Decisions\n",
-	}
-
-	deps := testDeps(t, jiraServer, ghExec, claudeExec, "org/repo")
+	deps := testDeps(t, jiraServer, ghExec)
 
 	result, err := Init(deps, "org/repo", "feature/SV1-240-api")
 	if err != nil {
@@ -90,28 +87,46 @@ func TestInit_Success(t *testing.T) {
 	if !deps.Store.Exists("org/repo", "SV1-240") {
 		t.Error("knowledge file should exist after init")
 	}
-	content, err := deps.Store.Read("org/repo", "SV1-240")
-	if err != nil {
-		t.Fatalf("failed to read written file: %v", err)
-	}
-	if !strings.Contains(content, "SV1-240") {
-		t.Errorf("written content should contain ticket ID, got: %s", content)
-	}
 
-	// Verify Claude was called with raw data containing JIRA ticket info.
-	if len(claudeExec.Calls) != 1 {
-		t.Fatalf("expected 1 Claude call, got %d", len(claudeExec.Calls))
+	// Verify YAML structure by reading back as KnowledgeFile.
+	kf, err := deps.Store.ReadKnowledge("org/repo", "SV1-240")
+	if err != nil {
+		t.Fatalf("failed to read knowledge file: %v", err)
 	}
-	stdin := claudeExec.Calls[0].Stdin
-	if !strings.Contains(stdin, "SV1-240") {
-		t.Error("Claude stdin should contain ticket ID")
+	if kf.TicketID != "SV1-240" {
+		t.Errorf("TicketID = %q, want %q", kf.TicketID, "SV1-240")
 	}
-	if !strings.Contains(stdin, "Implement feature X") {
-		t.Error("Claude stdin should contain ticket summary")
+	if kf.Branch != "feature/SV1-240-api" {
+		t.Errorf("Branch = %q, want %q", kf.Branch, "feature/SV1-240-api")
+	}
+	if kf.JIRA.Summary != "Implement feature X" {
+		t.Errorf("JIRA.Summary = %q, want %q", kf.JIRA.Summary, "Implement feature X")
+	}
+	if kf.JIRA.Status != "In Progress" {
+		t.Errorf("JIRA.Status = %q, want %q", kf.JIRA.Status, "In Progress")
+	}
+	if kf.JIRA.Assignee != "Alice" {
+		t.Errorf("JIRA.Assignee = %q, want %q", kf.JIRA.Assignee, "Alice")
+	}
+	if len(kf.JIRA.Comments) != 1 {
+		t.Errorf("expected 1 JIRA comment, got %d", len(kf.JIRA.Comments))
+	}
+	if len(kf.PullRequests) != 1 {
+		t.Errorf("expected 1 PR, got %d", len(kf.PullRequests))
+	}
+	if len(kf.MainCommits) != 1 {
+		t.Errorf("expected 1 main commit, got %d", len(kf.MainCommits))
+	}
+	if len(kf.Notes) != 0 {
+		t.Errorf("expected 0 notes, got %d", len(kf.Notes))
+	}
+	if kf.LastRefreshed.IsZero() {
+		t.Error("LastRefreshed should be set")
 	}
 }
 
 func TestInit_LockContention(t *testing.T) {
+	t.Parallel()
 	ticket := &jiraTestTicket{
 		Key:     "SV1-100",
 		Summary: "Test",
@@ -123,8 +138,7 @@ func TestInit_LockContention(t *testing.T) {
 	ghExec := &MockGHExecutor{
 		Default: MockGHResponse{Stdout: "[]"},
 	}
-	claudeExec := &MockClaudeExecutor{Response: "knowledge content"}
-	deps := testDeps(t, jiraServer, ghExec, claudeExec, "org/repo")
+	deps := testDeps(t, jiraServer, ghExec)
 
 	// Pre-lock the ticket.
 	deps.Locks.TryLock(lockKey("org/repo", "SV1-100"))
@@ -142,7 +156,8 @@ func TestInit_LockContention(t *testing.T) {
 }
 
 func TestInit_NoTicketInBranch(t *testing.T) {
-	deps := testDeps(t, nil, nil, nil, "org/repo")
+	t.Parallel()
+	deps := testDeps(t, nil, nil)
 
 	_, err := Init(deps, "org/repo", "main")
 	if err == nil {
@@ -154,12 +169,12 @@ func TestInit_NoTicketInBranch(t *testing.T) {
 }
 
 func TestInit_JIRAFailure(t *testing.T) {
+	t.Parallel()
 	jiraServer := newJIRAFailServer(404)
 	defer jiraServer.Close()
 
 	ghExec := &MockGHExecutor{Default: MockGHResponse{Stdout: "[]"}}
-	claudeExec := &MockClaudeExecutor{Response: "knowledge"}
-	deps := testDeps(t, jiraServer, ghExec, claudeExec, "org/repo")
+	deps := testDeps(t, jiraServer, ghExec)
 
 	_, err := Init(deps, "org/repo", "feature/SV1-300-test")
 	if err == nil {
@@ -175,6 +190,7 @@ func TestInit_JIRAFailure(t *testing.T) {
 }
 
 func TestInit_GitHubFailure_FailsEarly(t *testing.T) {
+	t.Parallel()
 	ticket := &jiraTestTicket{
 		Key:     "SV1-400",
 		Summary: "Test early failure",
@@ -191,9 +207,7 @@ func TestInit_GitHubFailure_FailsEarly(t *testing.T) {
 		},
 	}
 
-	claudeExec := &MockClaudeExecutor{}
-
-	deps := testDeps(t, jiraServer, ghExec, claudeExec, "org/repo")
+	deps := testDeps(t, jiraServer, ghExec)
 
 	_, err := Init(deps, "org/repo", "feature/SV1-400-work")
 	if err == nil {

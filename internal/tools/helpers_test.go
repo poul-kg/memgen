@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/poul-kg/memgen/internal/claude"
 	"github.com/poul-kg/memgen/internal/knowledge"
 	"github.com/poul-kg/memgen/internal/sources"
 )
@@ -44,39 +43,6 @@ func (m *MockGHExecutor) Execute(name string, args ...string) (string, string, e
 		return r.Stdout, r.Stderr, r.Err
 	}
 	return m.Default.Stdout, m.Default.Stderr, m.Default.Err
-}
-
-// --- Mock Claude CommandExecutor ---
-
-// MockClaudeExecutor records calls and returns canned responses for the claude CLI.
-type MockClaudeExecutor struct {
-	Calls         []MockClaudeCall
-	Response      string
-	Stderr        string
-	Err           error
-	CallResponses []MockClaudeResponse
-}
-
-type MockClaudeCall struct {
-	Stdin string
-	Name  string
-	Args  []string
-}
-
-type MockClaudeResponse struct {
-	Response string
-	Stderr   string
-	Err      error
-}
-
-func (m *MockClaudeExecutor) ExecuteWithStdin(stdin string, name string, args ...string) (string, string, error) {
-	idx := len(m.Calls)
-	m.Calls = append(m.Calls, MockClaudeCall{Stdin: stdin, Name: name, Args: args})
-	if idx < len(m.CallResponses) {
-		r := m.CallResponses[idx]
-		return r.Response, r.Stderr, r.Err
-	}
-	return m.Response, m.Stderr, m.Err
 }
 
 // --- JIRA test server helpers ---
@@ -219,7 +185,7 @@ func (c *jiraTestComment) toResponse() jiraCommentResp {
 // --- Test deps builder ---
 
 // testDeps creates a Deps with real Store (temp dir), real LockManager, and injected mocks.
-func testDeps(t *testing.T, jiraServer *httptest.Server, ghExec *MockGHExecutor, claudeExec *MockClaudeExecutor, repo string) *Deps {
+func testDeps(t *testing.T, jiraServer *httptest.Server, ghExec *MockGHExecutor) *Deps {
 	t.Helper()
 	tmpDir := t.TempDir()
 
@@ -233,31 +199,17 @@ func testDeps(t *testing.T, jiraServer *httptest.Server, ghExec *MockGHExecutor,
 		}
 	}
 
-	var ghClient *sources.GitHubClient
-	if ghExec != nil {
-		ghClient = &sources.GitHubClient{
-			Repo:     repo,
-			Executor: ghExec,
-		}
-	}
-
-	var claudeCLI *claude.CLI
-	if claudeExec != nil {
-		claudeCLI = &claude.CLI{Executor: claudeExec}
-	}
-
 	baseURL := ""
 	if jiraServer != nil {
 		baseURL = jiraServer.URL
 	}
 
 	return &Deps{
-		Store:       knowledge.NewStore(tmpDir),
-		Locks:       knowledge.NewLockManager(),
-		JIRA:        jiraClient,
-		GitHub:      ghClient,
-		Claude:      claudeCLI,
-		JIRABaseURL: baseURL,
+		Store:          knowledge.NewStore(tmpDir),
+		Locks:          knowledge.NewLockManager(),
+		JIRA:           jiraClient,
+		GitHubExecutor: ghExec,
+		JIRABaseURL:    baseURL,
 	}
 }
 

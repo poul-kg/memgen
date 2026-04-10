@@ -46,6 +46,113 @@ func (m *MockExecutor) Execute(name string, args ...string) (string, string, err
 	return m.DefaultResponse.Stdout, m.DefaultResponse.Stderr, m.DefaultResponse.Err
 }
 
+func TestFilterPREntriesByTicket(t *testing.T) {
+	t.Parallel()
+
+	entries := []ghPRListEntry{
+		{Number: 1, Title: "SBUX-404: Fix login flow", Body: "Some body", HeadRefName: "feature/login"},
+		{Number: 2, Title: "Fix 404 page not found error", Body: "Unrelated PR about HTTP 404", HeadRefName: "fix/404-page"},
+		{Number: 3, Title: "Update configs", Body: "This relates to sbux-404 work", HeadRefName: "chore/configs"},
+		{Number: 4, Title: "Branch match", Body: "No mention in title or body", HeadRefName: "feature/SBUX-404-checkout"},
+		{Number: 5, Title: "Completely unrelated", Body: "Nothing relevant here", HeadRefName: "feature/unrelated"},
+	}
+
+	filtered := filterPREntriesByTicket(entries, "SBUX-404")
+
+	if len(filtered) != 3 {
+		t.Fatalf("expected 3 entries after filter, got %d", len(filtered))
+	}
+
+	// Verify which PRs survived.
+	numbers := make([]int, len(filtered))
+	for i, e := range filtered {
+		numbers[i] = e.Number
+	}
+
+	expected := []int{1, 3, 4}
+	for i, want := range expected {
+		if numbers[i] != want {
+			t.Errorf("filtered[%d]: expected PR #%d, got #%d", i, want, numbers[i])
+		}
+	}
+}
+
+func TestFetchPRs_FiltersFalsePositives(t *testing.T) {
+	// gh pr list returns 3 PRs: one real match, one with just "404", one unrelated.
+	prListData := `[
+		{
+			"number": 10,
+			"title": "SBUX-404: Implement checkout flow",
+			"body": "Implements SBUX-404.",
+			"state": "OPEN",
+			"author": {"login": "dev1"},
+			"createdAt": "2026-04-01T10:00:00Z",
+			"updatedAt": "2026-04-02T10:00:00Z",
+			"headRefName": "feature/SBUX-404-checkout",
+			"url": "https://github.com/myorg/myrepo/pull/10"
+		},
+		{
+			"number": 20,
+			"title": "Fix 404 page rendering",
+			"body": "The 404 page was broken.",
+			"state": "MERGED",
+			"author": {"login": "dev2"},
+			"createdAt": "2026-03-15T10:00:00Z",
+			"updatedAt": "2026-03-16T10:00:00Z",
+			"headRefName": "fix/404-page",
+			"url": "https://github.com/myorg/myrepo/pull/20"
+		},
+		{
+			"number": 30,
+			"title": "Add logging middleware",
+			"body": "General logging improvements.",
+			"state": "OPEN",
+			"author": {"login": "dev3"},
+			"createdAt": "2026-04-05T10:00:00Z",
+			"updatedAt": "2026-04-06T10:00:00Z",
+			"headRefName": "feature/logging",
+			"url": "https://github.com/myorg/myrepo/pull/30"
+		}
+	]`
+
+	emptyGraphql := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}`
+
+	mock := &MockExecutor{
+		Responses: map[string]MockResponse{
+			"gh pr list":                                      {Stdout: prListData},
+			"gh api repos/myorg/myrepo/pulls/10/reviews":      {Stdout: "[]"},
+			"gh api repos/myorg/myrepo/pulls/10/comments":     {Stdout: "[]"},
+			"gh api repos/myorg/myrepo/pulls/10/commits":      {Stdout: "[]"},
+			"gh api graphql -f query=query {\n  repository(owner: \"myorg\", name: \"myrepo\") {\n    pullRequest(number: 10)": {Stdout: emptyGraphql},
+		},
+	}
+
+	client := &GitHubClient{
+		Repo:     "myorg/myrepo",
+		Executor: mock,
+	}
+
+	prs, err := client.FetchPRs("SBUX-404")
+	if err != nil {
+		t.Fatalf("FetchPRs returned error: %v", err)
+	}
+
+	// Only PR #10 should survive (SBUX-404 in title/body/branch).
+	if len(prs) != 1 {
+		t.Fatalf("expected 1 PR after filtering, got %d", len(prs))
+	}
+	if prs[0].Number != 10 {
+		t.Errorf("expected PR #10, got #%d", prs[0].Number)
+	}
+
+	// Verify no API calls were made for filtered-out PRs #20 and #30.
+	for _, call := range mock.Calls {
+		if strings.Contains(call, "pulls/20") || strings.Contains(call, "pulls/30") {
+			t.Errorf("unexpected API call for filtered-out PR: %s", call)
+		}
+	}
+}
+
 func TestFetchPRs_Success(t *testing.T) {
 	prListData := string(loadTestdata(t, "gh_pr_list.json"))
 	reviewsData := string(loadTestdata(t, "gh_pr_reviews.json"))
@@ -70,6 +177,33 @@ func TestFetchPRs_Success(t *testing.T) {
 		}
 	]`
 
+	// GraphQL response for review thread resolved status.
+	graphqlResponse142 := `{
+		"data": {
+			"repository": {
+				"pullRequest": {
+					"reviewThreads": {
+						"nodes": [
+							{
+								"isResolved": true,
+								"comments": { "nodes": [{ "databaseId": 90001 }] }
+							},
+							{
+								"isResolved": false,
+								"comments": { "nodes": [{ "databaseId": 90003 }] }
+							},
+							{
+								"isResolved": true,
+								"comments": { "nodes": [{ "databaseId": 90004 }] }
+							}
+						]
+					}
+				}
+			}
+		}
+	}`
+	emptyGraphql := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}`
+
 	mock := &MockExecutor{
 		Responses: map[string]MockResponse{
 			"gh pr list": {Stdout: prListData},
@@ -82,6 +216,9 @@ func TestFetchPRs_Success(t *testing.T) {
 			"gh api repos/stitchai/platform/pulls/142/commits":  {Stdout: prCommitsData},
 			"gh api repos/stitchai/platform/pulls/147/commits":  {Stdout: "[]"},
 			"gh api repos/stitchai/platform/pulls/145/commits":  {Stdout: "[]"},
+			"gh api graphql -f query=query {\n  repository(owner: \"stitchai\", name: \"platform\") {\n    pullRequest(number: 142)": {Stdout: graphqlResponse142},
+			"gh api graphql -f query=query {\n  repository(owner: \"stitchai\", name: \"platform\") {\n    pullRequest(number: 147)": {Stdout: emptyGraphql},
+			"gh api graphql -f query=query {\n  repository(owner: \"stitchai\", name: \"platform\") {\n    pullRequest(number: 145)": {Stdout: emptyGraphql},
 		},
 	}
 
@@ -140,6 +277,31 @@ func TestFetchPRs_Success(t *testing.T) {
 	}
 	if pr.Comments[1].InReplyTo != 90001 {
 		t.Errorf("expected InReplyTo 90001 for reply comment, got %d", pr.Comments[1].InReplyTo)
+	}
+
+	// Check ID field on comments.
+	if pr.Comments[0].ID != 90001 {
+		t.Errorf("expected comment ID 90001, got %d", pr.Comments[0].ID)
+	}
+	if pr.Comments[1].ID != 90002 {
+		t.Errorf("expected comment ID 90002, got %d", pr.Comments[1].ID)
+	}
+
+	// Check Resolved field: comment 90001 is thread-start and should be resolved (true).
+	if !pr.Comments[0].Resolved {
+		t.Error("expected comment 90001 to be resolved")
+	}
+	// Comment 90002 is a reply (not a thread-start), so it won't be in the resolved map — should be false.
+	if pr.Comments[1].Resolved {
+		t.Error("expected comment 90002 (reply) to not be resolved")
+	}
+	// Comment 90003 is a thread-start, should be unresolved (false).
+	if pr.Comments[2].Resolved {
+		t.Error("expected comment 90003 to be unresolved")
+	}
+	// Comment 90004 is a thread-start, should be resolved (true).
+	if !pr.Comments[3].Resolved {
+		t.Error("expected comment 90004 to be resolved")
 	}
 
 	// Check commits for first PR.
@@ -344,6 +506,7 @@ func TestFetchMainCommits_VerifiesAPICall(t *testing.T) {
 
 func TestFetchPRsSince_FiltersCorrectly(t *testing.T) {
 	prListData := string(loadTestdata(t, "gh_pr_list.json"))
+	emptyGraphql := `{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}`
 
 	mock := &MockExecutor{
 		Responses: map[string]MockResponse{
@@ -357,6 +520,7 @@ func TestFetchPRsSince_FiltersCorrectly(t *testing.T) {
 			"gh api repos/stitchai/platform/pulls/142/commits":  {Stdout: "[]"},
 			"gh api repos/stitchai/platform/pulls/147/commits":  {Stdout: "[]"},
 			"gh api repos/stitchai/platform/pulls/145/commits":  {Stdout: "[]"},
+			"gh api graphql": {Stdout: emptyGraphql},
 		},
 	}
 

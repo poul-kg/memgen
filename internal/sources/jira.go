@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -22,7 +24,7 @@ type JIRAClient struct {
 type JIRATicket struct {
 	Key         string
 	Summary     string
-	Description string // rendered HTML description
+	Description string // plain text description (HTML stripped)
 	Status      string
 	Assignee    string
 	Reporter    string
@@ -142,9 +144,9 @@ func (c *JIRAClient) FetchTicket(ticketID string) (*JIRATicket, error) {
 		Labels:  issue.Fields.Labels,
 	}
 
-	// Use rendered HTML description if available, fall back to summary.
+	// Use rendered description if available (strip HTML), fall back to summary.
 	if issue.RenderedFields.Description != "" {
-		ticket.Description = issue.RenderedFields.Description
+		ticket.Description = stripHTML(issue.RenderedFields.Description)
 	} else {
 		ticket.Description = issue.Fields.Summary
 	}
@@ -173,6 +175,7 @@ func (c *JIRAClient) FetchTicket(ticketID string) (*JIRATicket, error) {
 }
 
 // FetchCommentsSince fetches only comments created or updated after the given timestamp.
+// Currently unused — refresh does a full re-fetch. Kept for potential future incremental refresh support.
 func (c *JIRAClient) FetchCommentsSince(ticketID string, since time.Time) ([]JIRAComment, error) {
 	httpClient := c.HTTPClient
 	if httpClient == nil {
@@ -243,9 +246,9 @@ func (c *JIRAClient) fetchAllComments(httpClient *http.Client, ticketID string) 
 			author = c.Author.DisplayName
 		}
 
-		body := c.RenderedBody
+		body := stripHTML(c.RenderedBody)
 		if body == "" {
-			body = string(c.Body)
+			body = extractADFText(c.Body)
 		}
 
 		comments = append(comments, JIRAComment{
@@ -257,6 +260,53 @@ func (c *JIRAClient) fetchAllComments(httpClient *http.Client, ticketID string) 
 	}
 
 	return comments, nil
+}
+
+// extractADFText recursively extracts plain text from JIRA's Atlassian Document Format (ADF) JSON.
+func extractADFText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var node map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &node); err != nil {
+		return string(raw)
+	}
+
+	var result strings.Builder
+
+	// If this node has "text", extract it.
+	if textRaw, ok := node["text"]; ok {
+		var text string
+		if err := json.Unmarshal(textRaw, &text); err == nil {
+			result.WriteString(text)
+		}
+	}
+
+	// Recurse into "content" array.
+	if contentRaw, ok := node["content"]; ok {
+		var children []json.RawMessage
+		if err := json.Unmarshal(contentRaw, &children); err == nil {
+			for _, child := range children {
+				childText := extractADFText(child)
+				if childText != "" {
+					result.WriteString(childText)
+					result.WriteString("\n")
+				}
+			}
+		}
+	}
+
+	return strings.TrimSpace(result.String())
+}
+
+var htmlTagRe = regexp.MustCompile(`<[^>]*>`)
+var multiNewlineRe = regexp.MustCompile(`\n{3,}`)
+
+// stripHTML removes HTML tags and collapses whitespace for cleaner text output.
+func stripHTML(s string) string {
+	text := htmlTagRe.ReplaceAllString(s, "")
+	text = multiNewlineRe.ReplaceAllString(text, "\n\n")
+	return strings.TrimSpace(text)
 }
 
 // setAuth sets Basic authentication headers on the request.

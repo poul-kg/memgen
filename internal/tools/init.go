@@ -3,6 +3,7 @@ package tools
 import (
 	"fmt"
 
+	"github.com/poul-kg/memgen/internal/knowledge"
 	"github.com/poul-kg/memgen/internal/ticket"
 )
 
@@ -14,56 +15,47 @@ func Init(deps *Deps, repo, branch string) (string, error) {
 		return "", err
 	}
 
-	// 2. Validate sources are accessible before doing any work.
-	if err := deps.GitHub.ValidateRepo(); err != nil {
+	// 2. Create per-request GitHub client and validate.
+	gh := deps.githubClient(repo)
+	if err := gh.ValidateRepo(); err != nil {
 		return "", err
 	}
-	if _, err := deps.JIRA.FetchTicket(ticketID); err != nil {
-		browseURL := ticket.BrowseURL(deps.JIRABaseURL, ticketID)
-		return "", fmt.Errorf("failed to fetch JIRA ticket %s (browse: %s): %w", ticketID, browseURL, err)
-	}
 
-	// 3. Try to acquire lock.
-	key := lockKey(repo, ticketID)
-	if !deps.Locks.TryLock(key) {
-		return "", fmt.Errorf("An operation is already in progress for %s. Try again later.", ticketID)
-	}
-	defer deps.Locks.Unlock(key)
-
-	// 4. Fetch JIRA ticket (already validated, fetch again for data).
+	// 3. Fetch JIRA ticket (validates ticket exists).
 	jiraTicket, err := deps.JIRA.FetchTicket(ticketID)
 	if err != nil {
 		browseURL := ticket.BrowseURL(deps.JIRABaseURL, ticketID)
 		return "", fmt.Errorf("failed to fetch JIRA ticket %s (browse: %s): %w", ticketID, browseURL, err)
 	}
 
+	// 4. Try to acquire lock.
+	key := lockKey(repo, ticketID)
+	if !deps.Locks.TryLock(key) {
+		return "", fmt.Errorf("An operation is already in progress for %s. Try again later.", ticketID)
+	}
+	defer deps.Locks.Unlock(key)
+
 	// 5. Fetch GitHub PRs.
-	prs, err := deps.GitHub.FetchPRs(ticketID)
+	prs, err := gh.FetchPRs(ticketID)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch GitHub PRs for %s: %w", ticketID, err)
 	}
 
 	// 6. Fetch main branch commits.
-	mainCommits, err := deps.GitHub.FetchMainCommits(ticketID)
+	mainCommits, err := gh.FetchMainCommits(ticketID)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch main branch commits for %s: %w", ticketID, err)
 	}
 
-	// 7. Format all raw data.
-	rawData := formatRawData(jiraTicket, prs, mainCommits)
+	// 7. Build knowledge file directly from source data.
+	kf := knowledge.FromSources(ticketID, branch, jiraTicket, prs, mainCommits)
 
-	// 8. Call Claude CLI InitKnowledge.
-	result, err := deps.Claude.InitKnowledge(rawData, branch, ticketID)
-	if err != nil {
-		return "", fmt.Errorf("failed to initialize knowledge via Claude: %w", err)
-	}
-
-	// 9. Write result to store.
-	if err := deps.Store.Write(repo, ticketID, result); err != nil {
+	// 8. Write YAML knowledge file.
+	if err := deps.Store.WriteKnowledge(repo, ticketID, kf); err != nil {
 		return "", fmt.Errorf("failed to write knowledge file: %w", err)
 	}
 
-	// 10. Return success summary.
+	// 9. Return success summary.
 	return fmt.Sprintf("Initialized knowledge for %s: JIRA ticket + %d PRs + %d commits on main",
 		ticketID, len(prs), len(mainCommits)), nil
 }

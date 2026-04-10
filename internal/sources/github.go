@@ -69,12 +69,14 @@ type Review struct {
 
 // PRComment holds a pull request comment (both issue comments and review comments).
 type PRComment struct {
+	ID        int // GitHub database ID
 	Author    string
 	Body      string
 	Path      string // file path if it's a review comment
 	CreatedAt time.Time
 	UpdatedAt time.Time
-	InReplyTo int // parent comment ID, 0 if top-level
+	InReplyTo int  // parent comment ID, 0 if top-level
+	Resolved  bool // whether the review thread is resolved
 }
 
 // ghPRListEntry represents the JSON from `gh pr list --json ...`.
@@ -138,6 +140,9 @@ type ghCommitAuthor struct {
 
 // ValidateRepo checks that the configured repo exists and is accessible via gh CLI.
 func (g *GitHubClient) ValidateRepo() error {
+	if g.Repo == "" || !strings.Contains(g.Repo, "/") {
+		return fmt.Errorf("GitHub repository not configured. Got %q — expected \"owner/repo\" format. Check the x-mcp-repo header in your .mcp.json configuration", g.Repo)
+	}
 	log.Printf("GitHub: validating repo %s", g.Repo)
 	_, stderr, err := g.Executor.Execute("gh", "repo", "view", g.Repo, "--json", "name")
 	if err != nil {
@@ -179,6 +184,10 @@ func (g *GitHubClient) FetchPRs(ticketID string) ([]PR, error) {
 		return nil, fmt.Errorf("parsing gh pr list output: %w", err)
 	}
 	log.Printf("GitHub: found %d PRs for %s", len(entries), ticketID)
+
+	// Post-filter: GitHub search is fuzzy, filter to exact ticket ID matches.
+	entries = filterPREntriesByTicket(entries, ticketID)
+	log.Printf("GitHub: %d PRs remain after exact-match filtering for %s", len(entries), ticketID)
 
 	owner, repo := g.ownerRepo()
 	prs := make([]PR, 0, len(entries))
@@ -257,6 +266,7 @@ func (g *GitHubClient) FetchMainCommits(ticketID string) ([]Commit, error) {
 }
 
 // FetchPRsSince finds PRs updated after the given timestamp.
+// Currently unused — refresh does a full re-fetch. Kept for potential future incremental refresh support.
 func (g *GitHubClient) FetchPRsSince(ticketID string, since time.Time) ([]PR, error) {
 	prs, err := g.FetchPRs(ticketID)
 	if err != nil {
@@ -277,6 +287,7 @@ func (g *GitHubClient) FetchPRsSince(ticketID string, since time.Time) ([]PR, er
 }
 
 // FetchMainCommitsSince finds commits on the default branch after the given timestamp containing ticket ID.
+// Currently unused — refresh does a full re-fetch. Kept for potential future incremental refresh support.
 func (g *GitHubClient) FetchMainCommitsSince(ticketID string, since time.Time) ([]Commit, error) {
 	log.Printf("GitHub: fetching default branch commits since %s for %s", since.Format(time.RFC3339), ticketID)
 
@@ -306,7 +317,7 @@ func (g *GitHubClient) FetchMainCommitsSince(ticketID string, since time.Time) (
 // fetchReviews retrieves reviews for a specific PR.
 func (g *GitHubClient) fetchReviews(owner, repo string, prNumber int) ([]Review, error) {
 	stdout, stderr, err := g.Executor.Execute("gh", "api",
-		fmt.Sprintf("repos/%s/%s/pulls/%d/reviews", owner, repo, prNumber),
+		fmt.Sprintf("repos/%s/%s/pulls/%d/reviews?per_page=100", owner, repo, prNumber),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("gh api reviews failed: %w (stderr: %s)", err, stderr)
@@ -334,7 +345,7 @@ func (g *GitHubClient) fetchReviews(owner, repo string, prNumber int) ([]Review,
 // fetchReviewComments retrieves review comments for a specific PR.
 func (g *GitHubClient) fetchReviewComments(owner, repo string, prNumber int) ([]PRComment, error) {
 	stdout, stderr, err := g.Executor.Execute("gh", "api",
-		fmt.Sprintf("repos/%s/%s/pulls/%d/comments", owner, repo, prNumber),
+		fmt.Sprintf("repos/%s/%s/pulls/%d/comments?per_page=100", owner, repo, prNumber),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("gh api review comments failed: %w (stderr: %s)", err, stderr)
@@ -343,6 +354,13 @@ func (g *GitHubClient) fetchReviewComments(owner, repo string, prNumber int) ([]
 	var entries []ghReviewCommentEntry
 	if err := json.Unmarshal([]byte(stdout), &entries); err != nil {
 		return nil, fmt.Errorf("parsing review comments JSON: %w", err)
+	}
+
+	// Fetch resolved status via GraphQL. If it fails, default all to unresolved.
+	resolvedMap, threadErr := g.fetchReviewThreads(owner, repo, prNumber)
+	if threadErr != nil {
+		log.Printf("GitHub: warning: failed to fetch review thread resolved status for PR #%d: %v (defaulting to unresolved)", prNumber, threadErr)
+		resolvedMap = map[int]bool{}
 	}
 
 	comments := make([]PRComment, 0, len(entries))
@@ -354,22 +372,85 @@ func (g *GitHubClient) fetchReviewComments(owner, repo string, prNumber int) ([]
 			inReplyTo = *e.InReplyToID
 		}
 		comments = append(comments, PRComment{
+			ID:        e.ID,
 			Author:    e.User.Login,
 			Body:      e.Body,
 			Path:      e.Path,
 			CreatedAt: createdAt,
 			UpdatedAt: updatedAt,
 			InReplyTo: inReplyTo,
+			Resolved:  resolvedMap[e.ID],
 		})
 	}
 
 	return comments, nil
 }
 
+// ghGraphQLResponse represents the top-level GraphQL response structure.
+type ghGraphQLResponse struct {
+	Data struct {
+		Repository struct {
+			PullRequest struct {
+				ReviewThreads struct {
+					Nodes []ghReviewThread `json:"nodes"`
+				} `json:"reviewThreads"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	} `json:"data"`
+}
+
+// ghReviewThread represents a single review thread from the GraphQL API.
+type ghReviewThread struct {
+	IsResolved bool `json:"isResolved"`
+	Comments   struct {
+		Nodes []struct {
+			DatabaseID int `json:"databaseId"`
+		} `json:"nodes"`
+	} `json:"comments"`
+}
+
+// fetchReviewThreads fetches the resolved status of review threads for a PR via GraphQL.
+// Returns a map from the first comment's database ID in each thread to its resolved status.
+func (g *GitHubClient) fetchReviewThreads(owner, repo string, prNumber int) (map[int]bool, error) {
+	query := fmt.Sprintf(`query {
+  repository(owner: "%s", name: "%s") {
+    pullRequest(number: %d) {
+      reviewThreads(first: 100) {
+        nodes {
+          isResolved
+          comments(first: 1) {
+            nodes { databaseId }
+          }
+        }
+      }
+    }
+  }
+}`, owner, repo, prNumber)
+
+	stdout, stderr, err := g.Executor.Execute("gh", "api", "graphql", "-f", "query="+query)
+	if err != nil {
+		return nil, fmt.Errorf("gh api graphql failed: %w (stderr: %s)", err, stderr)
+	}
+
+	var resp ghGraphQLResponse
+	if err := json.Unmarshal([]byte(stdout), &resp); err != nil {
+		return nil, fmt.Errorf("parsing GraphQL response: %w", err)
+	}
+
+	result := make(map[int]bool)
+	for _, thread := range resp.Data.Repository.PullRequest.ReviewThreads.Nodes {
+		if len(thread.Comments.Nodes) > 0 {
+			commentID := thread.Comments.Nodes[0].DatabaseID
+			result[commentID] = thread.IsResolved
+		}
+	}
+	return result, nil
+}
+
 // fetchPRCommits retrieves commits for a specific PR.
 func (g *GitHubClient) fetchPRCommits(owner, repo string, prNumber int) ([]Commit, error) {
 	stdout, stderr, err := g.Executor.Execute("gh", "api",
-		fmt.Sprintf("repos/%s/%s/pulls/%d/commits", owner, repo, prNumber),
+		fmt.Sprintf("repos/%s/%s/pulls/%d/commits?per_page=100", owner, repo, prNumber),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("gh api PR commits failed: %w (stderr: %s)", err, stderr)
@@ -381,6 +462,22 @@ func (g *GitHubClient) fetchPRCommits(owner, repo string, prNumber int) ([]Commi
 	}
 
 	return convertCommits(entries), nil
+}
+
+// filterPREntriesByTicket keeps only PR entries where the ticket ID appears
+// in the title, body, or branch name. GitHub's search is fuzzy and may return
+// false positives (e.g., "404" matching in unrelated contexts).
+func filterPREntriesByTicket(entries []ghPRListEntry, ticketID string) []ghPRListEntry {
+	needle := strings.ToLower(ticketID)
+	var filtered []ghPRListEntry
+	for _, e := range entries {
+		if strings.Contains(strings.ToLower(e.Title), needle) ||
+			strings.Contains(strings.ToLower(e.Body), needle) ||
+			strings.Contains(strings.ToLower(e.HeadRefName), needle) {
+			filtered = append(filtered, e)
+		}
+	}
+	return filtered
 }
 
 // filterCommitsByTicket filters commits whose message contains the ticket ID.

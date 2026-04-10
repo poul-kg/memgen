@@ -107,6 +107,11 @@ func registerGet(s *mcpserver.MCPServer, deps *tools.Deps) {
 					"type":        "string",
 					"description": "Git branch name containing the JIRA ticket ID",
 				},
+				"scope": map[string]any{
+					"type":        "string",
+					"description": "Filter which section to return: jira, pr, git, comments, notes. Omit for full knowledge.",
+					"enum":        []string{"jira", "pr", "git", "comments", "notes"},
+				},
 			},
 			Required: []string{"branch"},
 		},
@@ -119,7 +124,8 @@ func registerGet(s *mcpserver.MCPServer, deps *tools.Deps) {
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
-		result, err := tools.Get(deps, repo, branch)
+		scope, _ := request.GetArguments()["scope"].(string)
+		result, err := tools.Get(deps, repo, branch, scope)
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
@@ -130,7 +136,7 @@ func registerGet(s *mcpserver.MCPServer, deps *tools.Deps) {
 func registerSet(s *mcpserver.MCPServer, deps *tools.Deps) {
 	s.AddTool(mcp.Tool{
 		Name:        "memgen__set",
-		Description: "Store key decisions from the current session. Requires branch and decisions arguments. Use a sub-agent to run this tool.",
+		Description: "Append a note to the knowledge file for the current branch's ticket. Requires branch and note arguments.",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]any{
@@ -138,12 +144,16 @@ func registerSet(s *mcpserver.MCPServer, deps *tools.Deps) {
 					"type":        "string",
 					"description": "Git branch name containing the JIRA ticket ID",
 				},
+				"note": map[string]any{
+					"type":        "string",
+					"description": "A note to append to the knowledge file with a UTC timestamp",
+				},
 				"decisions": map[string]any{
 					"type":        "string",
-					"description": "Key decisions to store from the current session",
+					"description": "Deprecated: use 'note' instead. Key decisions to store.",
 				},
 			},
-			Required: []string{"branch", "decisions"},
+			Required: []string{"branch"},
 		},
 	}, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		repo, err := repoFromContext(ctx)
@@ -154,11 +164,14 @@ func registerSet(s *mcpserver.MCPServer, deps *tools.Deps) {
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
-		decisions, err := request.RequireString("decisions")
-		if err != nil {
-			return errorResult(err.Error()), nil
+		note, _ := request.GetArguments()["note"].(string)
+		if note == "" {
+			note, _ = request.GetArguments()["decisions"].(string)
 		}
-		result, err := tools.Set(deps, repo, branch, decisions)
+		if note == "" {
+			return errorResult("Missing required argument: 'note' (or 'decisions')"), nil
+		}
+		result, err := tools.Set(deps, repo, branch, note)
 		if err != nil {
 			return errorResult(err.Error()), nil
 		}
@@ -169,7 +182,7 @@ func registerSet(s *mcpserver.MCPServer, deps *tools.Deps) {
 func registerRefresh(s *mcpserver.MCPServer, deps *tools.Deps) {
 	s.AddTool(mcp.Tool{
 		Name:        "memgen__refresh",
-		Description: "Refresh knowledge with latest data from JIRA and GitHub. Requires branch argument. Use a sub-agent to run this tool.",
+		Description: "Refresh knowledge with latest data from JIRA and GitHub. Notes are preserved. Requires branch argument. Use a sub-agent to run this tool.",
 		InputSchema: mcp.ToolInputSchema{
 			Type: "object",
 			Properties: map[string]any{

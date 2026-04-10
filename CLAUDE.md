@@ -27,10 +27,9 @@ go test ./internal/tools/...
 cmd/memgen/main.go          -- Entry point, startup validation, config loading
 internal/
   config/                    -- TOML config parsing and validation
-  knowledge/                 -- File store (store.go) and per-ticket locks (lock.go)
+  knowledge/                 -- File store (store.go), per-ticket locks (lock.go), YAML types (types.go), source conversion (convert.go)
   ticket/                    -- Branch-to-JIRA-ticket extraction
   sources/                   -- JIRA REST API client + GitHub gh CLI wrapper
-  claude/                    -- Claude CLI wrapper for summarization/merging
   tools/                     -- MCP tool implementations (init, get, set, refresh)
   server/                    -- HTTP/MCP server setup and tool registration
 commands/                    -- Claude Code slash commands (/kg, /ks, /kr)
@@ -40,9 +39,9 @@ testdata/                    -- JSON fixtures for JIRA and GitHub API mocks
 ## Architecture
 
 - **Transport**: HTTP-based MCP server using `mcp-go` library (streamable HTTP). Not stdio.
-- **Storage**: Markdown files in `~/.config/memgen/knowledge/<org>/<repo>/<TICKET>.md`
+- **Storage**: YAML files (.yaml) in `~/.config/memgen/knowledge/<org>/<repo>/<TICKET>.yaml`
 - **Config**: TOML at `~/.config/memgen/config.toml`
-- **External deps**: `claude` CLI (Opus 4.6) for summarization, `gh` CLI for GitHub data, JIRA REST API v3 for ticket data.
+- **External deps**: `gh` CLI for GitHub data, JIRA REST API v3 for ticket data.
 - **Concurrency**: In-process non-blocking `TryLock` per ticket. Returns "try again later" if locked.
 - **Repo**: Passed via `x-mcp-repo` HTTP header. Branch passed as tool argument.
 
@@ -50,7 +49,7 @@ testdata/                    -- JSON fixtures for JIRA and GitHub API mocks
 
 - Go standard layout: `cmd/` for binaries, `internal/` for private packages.
 - Table-driven tests with `t.Parallel()` where possible.
-- External commands (`gh`, `claude`) are abstracted behind `CommandExecutor` interfaces for testability.
+- External commands (`gh`) are abstracted behind `CommandExecutor` interfaces for testability.
 - JIRA API is tested via `httptest.NewServer` mocks.
 - All timestamps are UTC (RFC3339 format).
 - No authentication on the MCP server — local network only.
@@ -58,17 +57,16 @@ testdata/                    -- JSON fixtures for JIRA and GitHub API mocks
 ## Key Interfaces for Mocking
 
 - `sources.CommandExecutor` — for `gh` CLI calls
-- `claude.CommandExecutor` — for `claude` CLI calls (has `ExecuteWithStdin`)
 - JIRA client uses real HTTP, mocked via `httptest.NewServer` in tests
 
 ## MCP Tools
 
 | Tool | Args | Description |
 |------|------|-------------|
-| `memgen__init` | `branch` | Gathers JIRA + GitHub data, summarizes via Claude, creates knowledge file |
-| `memgen__get` | `branch` | Reads knowledge file, warns if stale |
-| `memgen__set` | `branch`, `decisions` | Merges agent decisions into knowledge file via Claude |
-| `memgen__refresh` | `branch` | Fetches only new data since last refresh, merges via Claude |
+| `memgen__init` | `branch` | Gathers JIRA + GitHub data, creates structured YAML knowledge file |
+| `memgen__get` | `branch`, `scope` (optional) | Reads knowledge file, warns if stale. Scope filters: jira, pr, git, comments, notes |
+| `memgen__set` | `branch`, `note` | Appends a timestamped note to the knowledge file |
+| `memgen__refresh` | `branch` | Re-fetches all data from JIRA and GitHub, preserves notes |
 
 ## Code Quality
 
