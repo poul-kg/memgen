@@ -16,7 +16,7 @@ Multiple AI coding agents work interchangeably on tasks tied to JIRA tickets acr
 
 A single Go binary (`memgen`) that runs as an HTTP-based MCP server on a Linux machine in the local network. Agents connect via MCP-over-HTTP, pass their current git branch, and MemGen extracts the JIRA ticket ID, manages knowledge files, and provides tools to initialize, retrieve, update, and refresh knowledge.
 
-Knowledge is assembled and maintained by invoking the `claude` CLI (Opus 4.6, high effort) to summarize, merge, and deduplicate data from JIRA, GitHub PRs, and agent-provided decisions.
+Knowledge is assembled directly by Go code that converts JIRA and GitHub data into structured YAML files. No LLM is involved in knowledge assembly.
 
 ### Key Design Principles
 
@@ -35,10 +35,8 @@ Knowledge is assembled and maintained by invoking the `claude` CLI (Opus 4.6, hi
 
 The MCP server MUST validate the following before accepting any connections. If any check fails, exit with a clear, actionable error message.
 
-1. **`claude` CLI**: Must be installed and authenticated. Invoke a test prompt (e.g., `claude --print "ping"`) to verify. If not authenticated, exit with error instructing the user to run `claude` and authenticate.
-
-2. **`gh` CLI**: Must be installed and authenticated. Invoke `gh auth status` to verify. If not installed or not authenticated, exit with:
-   - Installation instructions for Fedora 43 (primary), plus macOS, Windows, Ubuntu, and other Linux distros.
+1. **`gh` CLI**: Must be installed and authenticated. Invoke `gh auth status` to verify. If not installed or not authenticated, exit with:
+   - Installation instructions for Fedora (primary), plus macOS, Windows, Ubuntu, and other Linux distros.
    - Instructions to run `gh auth login`.
 
 ### Config & Storage
@@ -63,7 +61,7 @@ token = "your-jira-api-token"
 3. If `config.toml` exists but contains placeholder/default values, exit with a message telling the user to fill in real values.
 4. If `config.toml` is properly configured, proceed to dependency validation and startup.
 
-**Knowledge storage**: Organized by repository, then by ticket ID.
+**Knowledge storage**: YAML files organized by repository, then by ticket ID.
 
 ```
 ~/.config/memgen/
@@ -71,12 +69,12 @@ token = "your-jira-api-token"
   knowledge/
     stitch-ai/
       stitch-mono/
-        SV1-240.md
-        SV1-241.md
-        SBUX-111.md
+        SV1-240.yaml
+        SV1-241.yaml
+        SBUX-111.yaml
     other-org/
       other-repo/
-        PROJ-100.md
+        PROJ-100.yaml
 ```
 
 ### MCP HTTP Server
@@ -117,7 +115,7 @@ Example `.mcp.json` for Claude Code:
 
 ### Branch Pattern
 
-Extract the JIRA ticket ID from the branch name using the **first match** of the pattern `[A-Z]+-\d+`.
+Extract the JIRA ticket ID from the branch name using the **first match** of the pattern `[A-Z][A-Z0-9]+-\d+`.
 
 Examples:
 - `SV1-240-mail-threading` -> `SV1-240`
@@ -127,14 +125,14 @@ Examples:
 
 ### Validation
 
-After extracting the ticket ID, validate it exists in JIRA by calling the JIRA REST API. If the API returns 404 or any error:
+If no ticket pattern is found in the branch name, return an error: "No JIRA ticket detected in branch name `<branch>`. Branch must contain a ticket ID like SV1-240."
 
-- Return an error message that includes:
-  - The detected ticket ID
-  - A clickable JIRA URL: `https://stitchai.atlassian.net/browse/<TICKET-ID>`
-  - A message: "Could not find this ticket in JIRA. Check the link above — if the ticket doesn't exist, update/rename your branch and try again."
+JIRA ticket existence is validated during `init` and `refresh` when `FetchTicket()` is called. If the JIRA API returns 404, the error includes:
+- The detected ticket ID.
+- A browse URL generated from the configured JIRA base URL: `<jira-url>/browse/<TICKET-ID>`.
+- The error message from the JIRA client.
 
-If no ticket pattern is found in the branch name, return an error: "No JIRA ticket detected in branch name `<branch>`. Branch must contain a JIRA ticket ID (e.g., SV1-240-description)."
+The `ticket.BrowseURL()` helper generates browse URLs using the JIRA base URL from config (not hardcoded).
 
 ---
 
@@ -151,11 +149,13 @@ All tools require `branch` as a **required argument**. All tools extract the rep
 **Steps**:
 
 1. Extract ticket ID from `branch` argument.
-2. Validate ticket exists in JIRA (see Section 3).
-3. Gather data from all sources (see Section 5) into a temporary file.
-4. Invoke `claude` CLI to process all gathered raw data into a structured knowledge summary (see Section 6 for knowledge file format).
-5. Write the result to `~/.config/memgen/knowledge/<owner>/<repo>/<TICKET-ID>.md`.
-6. Return success with a summary of what was gathered (e.g., "Initialized knowledge for SV1-240: JIRA ticket + 3 PRs + 12 commits on main").
+2. Create per-request GitHub client and validate the repo exists.
+3. Fetch JIRA ticket data (validates ticket exists in JIRA, see Section 3).
+4. Fetch GitHub PRs matching the ticket ID (with post-filtering for exact matches).
+5. Fetch main branch commits referencing the ticket ID.
+6. Build a `KnowledgeFile` struct directly from source data via `knowledge.FromSources()`.
+7. Write the result as YAML to `~/.config/memgen/knowledge/<owner>/<repo>/<TICKET-ID>.yaml`.
+8. Return success with a summary of what was gathered (e.g., "Initialized knowledge for SV1-240: JIRA ticket + 3 PRs + 12 commits on main").
 
 **If the knowledge file already exists**: Overwrite it. `init` is a full re-initialization.
 
@@ -163,21 +163,32 @@ All tools require `branch` as a **required argument**. All tools extract the rep
 
 **Purpose**: Retrieve stored knowledge for the current branch's ticket.
 
+**Arguments**: `branch` (required), `scope` (optional).
+
+**Scope filtering**: The `scope` parameter allows returning only a specific section of the knowledge file. Valid scopes are:
+- `""` (empty/omitted) -- full YAML knowledge file
+- `"jira"` -- JIRA ticket section only
+- `"pr"` -- slim PR summaries (number, title, state, author, URL, body -- no reviews/comments/commits)
+- `"git"` -- full PR data + main branch commits
+- `"comments"` -- all PR review comments and reviews aggregated across all PRs
+- `"notes"` -- notes section only
+
 **Steps**:
 
 1. Extract ticket ID from `branch` argument.
-2. Look up `~/.config/memgen/knowledge/<owner>/<repo>/<TICKET-ID>.md`.
-3. If the file exists:
-   - Read and return its contents.
-   - Check the file's last-refresh timestamp. If older than 24 hours (configurable), append an informational note: "Knowledge was last refreshed on `<UTC timestamp>` (`<N>` days ago). Consider running `/kr` to refresh."
-   - Never block or fail based on staleness — information only.
-4. If the file does not exist:
+2. If the file does not exist:
    - Return HTTP 200 with message: "No knowledge found for `<TICKET-ID>`. Run `memgen__init` to initialize knowledge for this ticket."
    - The calling agent is expected to follow this recommendation.
+3. If scope is provided, use `ReadSection()` to return only that YAML section.
+4. If no scope, read and unmarshal the full YAML, re-marshal and return.
+5. Check the `last_refreshed` timestamp. If older than 24 hours, append a staleness warning: "Warning: knowledge is N days old" with a suggestion to run `memgen__refresh`.
+6. Never block or fail based on staleness -- information only.
 
 ### 4.3 `memgen__set`
 
-**Purpose**: Store key decisions and context from the current agent session into the knowledge file.
+**Purpose**: Append a timestamped note to the knowledge file for the current branch's ticket.
+
+**Arguments**: `branch` (required), `note` (required). The `decisions` argument is accepted as a deprecated alias for `note`.
 
 **Concurrency**: Same lock mechanism as `init`. If locked, return "try again later."
 
@@ -188,19 +199,14 @@ All tools require `branch` as a **required argument**. All tools extract the rep
 1. Extract ticket ID from `branch` argument.
 2. Verify knowledge file exists.
 3. Acquire lock for `<repo>/<ticket-id>`.
-4. Read existing knowledge file.
-5. Invoke `claude` CLI with:
-   - The existing knowledge file content (old knowledge)
-   - The new decisions/context provided by the agent (new knowledge)
-   - Instructions to merge: new knowledge/decisions overwrite older conflicting decisions, deduplicate, and preserve everything that is still relevant.
-   - If the new knowledge is identical or already covered, make no changes.
-6. Timestamp every new decision entry with the current UTC time.
-7. Write the merged result back to the knowledge file.
-8. Return success with a summary of what changed (or "no changes needed" if deduplicated).
+4. Read existing knowledge file as a `KnowledgeFile` struct.
+5. Append a new `Note` entry with the current UTC timestamp and the provided note body.
+6. Write the updated struct back as YAML.
+7. Return success: "Added note for `<TICKET-ID>`."
 
 ### 4.4 `memgen__refresh`
 
-**Purpose**: Refresh knowledge by fetching only new data since the last refresh.
+**Purpose**: Refresh knowledge by re-fetching all data from JIRA and GitHub. Notes are preserved.
 
 **Concurrency**: Same lock mechanism. If locked, return "try again later."
 
@@ -209,155 +215,214 @@ All tools require `branch` as a **required argument**. All tools extract the rep
 **Steps**:
 
 1. Extract ticket ID from `branch` argument.
-2. Read existing knowledge file, extract the last-refresh timestamp.
-3. Fetch only new data from sources **after** the last-refresh timestamp:
-   - JIRA: comments created/updated after timestamp.
-   - GitHub: PR comments, reviews, and commits after timestamp.
-   - Main branch commits referencing the ticket after timestamp.
-4. If no new data found, update the refresh timestamp and return "Knowledge is up to date."
-5. If new data found, invoke `claude` CLI to merge new data into existing knowledge (same merge logic as `set`).
-6. Update the refresh timestamp.
-7. Return summary of what was added.
+2. Verify knowledge file exists.
+3. Create per-request GitHub client and validate repo.
+4. Acquire lock for `<repo>/<ticket-id>`.
+5. Read existing knowledge file, save the Notes section.
+6. Full re-fetch from all sources: JIRA ticket, GitHub PRs (with filtering), main branch commits.
+7. Build a new `KnowledgeFile` struct from fresh data via `knowledge.FromSources()`.
+8. Restore the saved Notes section into the new struct.
+9. Write as YAML.
+10. Return summary: "Refreshed knowledge for `<TICKET-ID>`: JIRA ticket + N PRs + N commits on main."
 
 ---
 
 ## 5. Data Sources
 
-All external data fetching uses the `gh` CLI for GitHub and the JIRA REST API (v3, Cloud) for JIRA.
+All external data fetching uses the `gh` CLI for GitHub and the JIRA REST API (v3, Cloud) for JIRA. Source data is converted directly into Go structs (`knowledge.KnowledgeFile`) via `knowledge.FromSources()` -- no LLM processing is involved.
 
 ### 5.1 JIRA
 
 - **API**: `https://<jira-url>/rest/api/3/issue/<TICKET-ID>?expand=renderedFields`
 - **Auth**: Basic auth with email + API token from `config.toml`.
 - **Fetch**:
-  - Ticket summary, description, status, assignee, reporter, priority, labels, sprint.
-  - All comments (with authors and timestamps).
+  - Ticket summary, description (HTML stripped from rendered fields), status, assignee, reporter, priority, labels.
+  - All comments via separate API call: `GET /rest/api/3/issue/<TICKET-ID>/comment?orderBy=created`
+  - Comment body: prefers `renderedBody` (HTML stripped), falls back to recursive ADF text extraction.
+  - Timestamps parsed from JIRA format (`2006-01-02T15:04:05.000-0700`).
 
 ### 5.2 GitHub PRs
 
-- **Tool**: `gh pr list --repo <repo> --search "<TICKET-ID>" --state all --json number,title,body,state,author,createdAt,updatedAt,headRefName,url`
+- **Search**: `gh pr list --repo <repo> --search "<TICKET-ID>" --state all --json number,title,body,state,author,createdAt,updatedAt,headRefName,url --limit 100`
+- **Post-filtering**: Results are filtered by `filterPREntriesByTicket()` which checks for an exact case-insensitive match of the ticket ID in PR title, body, or branch name. This eliminates false positives from GitHub's fuzzy search (e.g., "404" matching "SBUX-404").
 - **For each PR found**:
-  - PR summary (title, body, state, author).
-  - All review comments and their replies: `gh api repos/<owner>/<repo>/pulls/<number>/comments`
-  - All review threads: resolved vs unresolved status.
-  - All PR reviews (approved, changes requested, commented): `gh api repos/<owner>/<repo>/pulls/<number>/reviews`
-  - Change request details — who requested what, and whether it was resolved.
-  - Commit messages on the PR.
-- **Include all PRs**: open, closed, merged. No filtering.
+  - PR metadata (title, body, state, author, URLs, timestamps, branch name).
+  - Reviews: `gh api repos/<owner>/<repo>/pulls/<number>/reviews?per_page=100`
+  - Review comments: `gh api repos/<owner>/<repo>/pulls/<number>/comments?per_page=100`
+  - Review thread resolved status: fetched via GraphQL API (`repository.pullRequest.reviewThreads`). Maps each thread's first comment database ID to its `isResolved` status. Graceful fallback to `resolved: false` if GraphQL is unavailable.
+  - Commits: `gh api repos/<owner>/<repo>/pulls/<number>/commits?per_page=100`
+- **Include all PRs**: open, closed, merged.
 
 ### 5.3 GitHub Commits on Main
 
-- **Tool**: `gh api repos/<owner>/<repo>/commits --paginate -q '.[] | select(.commit.message | test("<TICKET-ID>"))'` or equivalent search.
-- **Purpose**: Understand what has already been merged to main for this ticket.
-- **Fetch**: Commit hash, message, author, date.
+- **API**: `gh api repos/<owner>/<repo>/commits?sha=<branch>&per_page=100`
+- **Branch detection**: Tries `main` first, then `master`.
+- **Filtering**: Client-side filtering of commits whose message contains the ticket ID (exact string match).
+- **Fetch**: Commit SHA, message, author (prefers GitHub login, falls back to git author name), date.
 
 ### 5.4 Existing Knowledge File
 
-- If a `.md` file already exists for this ticket during `init`, it is read but **overwritten** (init is a full reset).
-- During `refresh` and `set`, the existing file is read and merged with new data.
+- If a `.yaml` file already exists for this ticket during `init`, it is **overwritten** (init is a full reset).
+- During `refresh`, the existing file is read, notes are preserved, and all other data is replaced with fresh fetches.
+- During `set`, the existing file is read and a new note is appended.
+- Legacy `.md` files are detected and a helpful error is returned suggesting re-init.
 
 ---
 
 ## 6. Knowledge File Format
 
-Each knowledge file is a Markdown document assembled and maintained by the `claude` CLI. The file MUST include these sections. Claude CLI is instructed to maintain this structure during all summarization and merge operations.
+Each knowledge file is a structured YAML document (`.yaml`) assembled directly by Go code. The file maps to the `knowledge.KnowledgeFile` Go struct defined in `internal/knowledge/types.go`.
 
-```markdown
-# <TICKET-ID>: <Ticket Summary>
+### Go Types
 
-**Last Refreshed**: <UTC timestamp>
-**Branch**: <branch name>
-**Status**: <JIRA status>
+```go
+type KnowledgeFile struct {
+    TicketID      string        `yaml:"ticket_id"`
+    Branch        string        `yaml:"branch"`
+    LastRefreshed time.Time     `yaml:"last_refreshed"`
+    JIRA          JIRASection   `yaml:"jira"`
+    PullRequests  []PullRequest `yaml:"pull_requests"`
+    MainCommits   []CommitEntry `yaml:"main_commits"`
+    Notes         []Note        `yaml:"notes"`
+}
 
-## JIRA Ticket
+type JIRASection struct {
+    Summary     string        `yaml:"summary"`
+    Description string        `yaml:"description"`
+    Status      string        `yaml:"status"`
+    Priority    string        `yaml:"priority"`
+    Assignee    string        `yaml:"assignee"`
+    Reporter    string        `yaml:"reporter"`
+    Labels      []string      `yaml:"labels"`
+    Comments    []JIRAComment `yaml:"comments"`
+}
 
-<Summarized ticket description, key details, acceptance criteria, etc.>
+type JIRAComment struct {
+    Author  string    `yaml:"author"`
+    Created time.Time `yaml:"created"`
+    Updated time.Time `yaml:"updated"`
+    Body    string    `yaml:"body"`
+}
 
-### JIRA Comments
+type PullRequest struct {
+    Number    int           `yaml:"number"`
+    Title     string        `yaml:"title"`
+    State     string        `yaml:"state"`
+    Author    string        `yaml:"author"`
+    URL       string        `yaml:"url"`
+    CreatedAt time.Time     `yaml:"created_at"`
+    UpdatedAt time.Time     `yaml:"updated_at"`
+    Branch    string        `yaml:"branch"`
+    Body      string        `yaml:"body"`
+    Reviews   []PRReview    `yaml:"reviews"`
+    Comments  []PRComment   `yaml:"comments"`
+    Commits   []CommitEntry `yaml:"commits"`
+}
 
-<Chronological summary of JIRA comments with authors and timestamps (UTC).>
+type PRReview struct {
+    Author    string    `yaml:"author"`
+    State     string    `yaml:"state"`
+    Body      string    `yaml:"body"`
+    CreatedAt time.Time `yaml:"created_at"`
+}
 
-## Pull Requests
+type PRComment struct {
+    ID        int       `yaml:"id"`
+    Author    string    `yaml:"author"`
+    Body      string    `yaml:"body"`
+    Path      string    `yaml:"path"`
+    CreatedAt time.Time `yaml:"created_at"`
+    UpdatedAt time.Time `yaml:"updated_at"`
+    InReplyTo int       `yaml:"in_reply_to"`
+    Resolved  bool      `yaml:"resolved"`
+}
 
-### PR #<number>: <title>
-- **State**: <open/closed/merged>
-- **Author**: <author>
-- **URL**: <url>
+type CommitEntry struct {
+    SHA     string    `yaml:"sha"`
+    Message string    `yaml:"message"`
+    Author  string    `yaml:"author"`
+    Date    time.Time `yaml:"date"`
+}
 
-<PR description summary>
-
-#### Review Comments & Change Requests
-
-<Structured summary of review threads:
-- Who requested what change
-- Whether it was resolved or still outstanding
-- Key discussion points and decisions
-- Replies and follow-ups>
-
-#### Commits
-
-<List of commits with messages>
-
-(Repeat for each PR)
-
-## Commits on Main
-
-<Commits already merged to main that reference this ticket.>
-
-## Decisions
-
-<Agent-provided decisions and context from `memgen__set` calls.
-Each entry timestamped in UTC.>
-
-### <UTC timestamp>
-<Decision content>
-
-### <UTC timestamp>
-<Decision content>
+type Note struct {
+    Date time.Time `yaml:"date"`
+    Body string    `yaml:"body"`
+}
 ```
 
-The exact formatting within sections is delegated to the `claude` CLI — it should produce clean, readable Markdown that agents can easily parse and act on. The section structure above is the required skeleton.
+### Example YAML
+
+```yaml
+ticket_id: STITCH-1234
+branch: feature/STITCH-1234-password-reset
+last_refreshed: 2026-04-10T12:00:00Z
+jira:
+  summary: "Implement password reset flow"
+  description: "Full description..."
+  status: "In Progress"
+  priority: "High"
+  assignee: "Alice Chen"
+  reporter: "Bob Miller"
+  labels: [auth, security]
+  comments:
+    - author: "Carol N"
+      created: 2026-04-03T10:00:00Z
+      updated: 2026-04-03T10:00:00Z
+      body: "Comment text"
+pull_requests:
+  - number: 142
+    title: "STITCH-1234: Implement password reset"
+    state: MERGED
+    author: alicec
+    url: https://github.com/org/repo/pull/142
+    created_at: 2026-04-03T10:00:00Z
+    updated_at: 2026-04-06T10:00:00Z
+    branch: feature/STITCH-1234-password-reset
+    body: "PR description"
+    reviews:
+      - author: bobm
+        state: APPROVED
+        body: "Looks good"
+        created_at: 2026-04-05T10:00:00Z
+    comments:
+      - id: 90001
+        author: bobm
+        body: "Token expiry should be configurable"
+        path: internal/auth/token.go
+        created_at: 2026-04-04T10:05:00Z
+        updated_at: 2026-04-04T10:05:00Z
+        in_reply_to: 0
+        resolved: true
+    commits:
+      - sha: abc123
+        message: "STITCH-1234: initial implementation"
+        author: alicec
+        date: 2026-04-03T15:00:00Z
+main_commits:
+  - sha: def456
+    message: "STITCH-1234: merged to main"
+    author: alicec
+    date: 2026-04-07T10:00:00Z
+notes:
+  - date: 2026-04-08T14:00:00Z
+    body: "Decided to use bcrypt cost factor 12 in next security review"
+```
+
+### Conversion
+
+Source data is converted to the YAML struct via `knowledge.FromSources(ticketID, branch, jiraTicket, prs, mainCommits)` in `internal/knowledge/convert.go`. This function maps source types (`sources.JIRATicket`, `sources.PR`, `sources.Commit`) to knowledge types (`JIRASection`, `PullRequest`, `CommitEntry`). All slices are initialized (never nil) to produce clean YAML output.
 
 ---
 
-## 7. Claude CLI Integration
+## 7. Data Processing
 
-### Invocation
+**No LLM dependency.** Knowledge files are assembled directly by Go code. The `claude` CLI is not used at runtime.
 
-All Claude CLI calls use:
+- **Init**: Source data (JIRA, GitHub) is fetched and converted to Go structs via `knowledge.FromSources()`, then marshaled to YAML via `gopkg.in/yaml.v3`.
+- **Set**: The existing YAML is unmarshaled, a new `Note` is appended, and the struct is re-marshaled.
+- **Refresh**: All source data is re-fetched fresh, converted to a new struct, existing notes are preserved, and the result is written as YAML.
 
-```bash
-claude --model claude-opus-4-6 --verbose --print --output-format text
-```
-
-Input is provided via stdin (pipe the raw data or existing knowledge + new data). The prompt instructs Claude what to produce.
-
-### Use Cases
-
-**A. Init — Full Knowledge Assembly**
-
-Pipe all raw gathered data (JIRA JSON, PR data, commit logs) to Claude with a system prompt instructing it to:
-- Parse and summarize all data into the knowledge file format (Section 6).
-- Maintain chronological order within sections.
-- Highlight unresolved PR review comments and outstanding change requests.
-- Convert all timestamps to UTC.
-
-**B. Set — Merge Decisions**
-
-Pipe the existing knowledge file + new decisions to Claude with a system prompt instructing it to:
-- Merge new decisions into the Decisions section.
-- If new decisions conflict with or supersede older ones, keep the new decision and mark or remove the old one.
-- If the new content is already present (duplicate), make no changes and report "no changes needed."
-- Timestamp each new decision with current UTC time.
-- Preserve all other sections unchanged.
-
-**C. Refresh — Incremental Merge**
-
-Pipe the existing knowledge file + new raw data (only data after last refresh) to Claude with a system prompt instructing it to:
-- Update relevant sections with new data (new JIRA comments, new PR comments, new commits).
-- Highlight newly unresolved review comments.
-- Preserve existing Decisions section untouched.
-- Update the Last Refreshed timestamp.
+This deterministic approach ensures reproducible output and eliminates the `claude` CLI as a runtime dependency.
 
 ---
 
@@ -377,51 +442,43 @@ Maintain a `sync.Mutex`-based lock map keyed by `<owner>/<repo>/<ticket-id>`.
 
 ## 9. Slash Commands
 
-Ship the following Claude Code command files in the `commands/` directory of the memgen repository. Users copy these to their project's `.claude/commands/` directory.
+Ship the following Claude Code command files in the `commands/` directory of the memgen repository. Users copy these to their project's `.claude/commands/` directory. Commands support `$ARGUMENTS` for passing parameters directly.
 
-### `/kg` — Knowledge Get
+### `/kg` -- Knowledge Get
 
 **File**: `commands/kg.md`
 
-```markdown
-Retrieve knowledge for the current ticket.
+Supports an optional scope argument via `$ARGUMENTS` (e.g., `/kg jira`, `/kg comments`).
 
+Steps:
 1. Run `git branch --show-current` to get the current branch name.
-2. Call the `memgen__get` MCP tool with the branch name.
-3. If the response says no knowledge exists, immediately call `memgen__init` with the same branch name using a sub-agent.
-4. After init completes, call `memgen__get` again and present the knowledge.
-5. If knowledge exists, present it to the user.
-```
+2. Call `memgen__get` with the branch name. If `$ARGUMENTS` is not empty, pass it as the `scope` argument.
+3. If no knowledge exists, call `memgen__init` using a sub-agent, then call `memgen__get` again (with the same scope).
+4. Present the knowledge. If there is a staleness warning, mention it.
 
-### `/ks` — Knowledge Set
+Available scopes: (no scope) = full file, `jira`, `pr`, `git`, `comments`, `notes`.
+
+### `/ks` -- Knowledge Set
 
 **File**: `commands/ks.md`
 
-```markdown
-Summarize and store key decisions from this session.
+Supports an optional note body via `$ARGUMENTS` (e.g., `/ks Decided to use approach B`).
 
+Steps:
 1. Run `git branch --show-current` to get the current branch name.
-2. Review the current conversation and summarize:
-   - Key decisions made
-   - Implementation choices and their rationale
-   - Problems encountered and how they were resolved
-   - Any open questions or TODOs
-3. Call the `memgen__set` MCP tool with the branch name and the summary, using a sub-agent.
+2. If `$ARGUMENTS` is not empty, use it directly as the note body. Call `memgen__set` with the branch name and note.
+3. If `$ARGUMENTS` is empty, review the current conversation, summarize key decisions/choices/problems/TODOs, and call `memgen__set` with the summary as the note, using a sub-agent.
 4. Report what was stored.
-```
 
-### `/kr` — Knowledge Refresh
+### `/kr` -- Knowledge Refresh
 
 **File**: `commands/kr.md`
 
-```markdown
-Refresh knowledge with latest data from JIRA and GitHub.
-
+Steps:
 1. Run `git branch --show-current` to get the current branch name.
-2. Call the `memgen__refresh` MCP tool with the branch name, using a sub-agent.
-3. After refresh completes, call `memgen__get` with the same branch name.
-4. Present the updated knowledge, highlighting what changed since last refresh.
-```
+2. Call `memgen__refresh` with the branch name, using a sub-agent. Wait for completion.
+3. Call `memgen__get` with the same branch name.
+4. Present the updated knowledge, highlighting what changed. Notes are preserved during refresh.
 
 ---
 
@@ -433,9 +490,7 @@ Refresh knowledge with latest data from JIRA and GitHub.
 |-----------|---------|
 | Config dir missing | "Created `~/.config/memgen/`. Edit `config.toml` and restart." |
 | Config has placeholders | "Edit `~/.config/memgen/config.toml` with your JIRA credentials and restart." |
-| `claude` CLI not found | "Claude CLI is not installed. Install it and run `claude` to authenticate." |
-| `claude` CLI not authenticated | "Claude CLI is not authenticated. Run `claude` and complete authentication." |
-| `gh` CLI not found | "GitHub CLI is not installed." + install instructions for Fedora 43, Ubuntu, macOS, Windows. |
+| `gh` CLI not found | "GitHub CLI is not installed." + install instructions for Fedora, Ubuntu, macOS, Windows. |
 | `gh` CLI not authenticated | "GitHub CLI is not authenticated. Run `gh auth login` to authenticate." |
 | Invalid TOML config | "Failed to parse `config.toml`: `<error>`" |
 
@@ -446,12 +501,15 @@ Refresh knowledge with latest data from JIRA and GitHub.
 | Missing `x-mcp-repo` header | "Missing required header `x-mcp-repo`." |
 | Missing `branch` argument | "Missing required argument `branch`." |
 | No ticket ID in branch | "No JIRA ticket detected in branch `<branch>`. Branch must contain a ticket ID like SV1-240." |
-| JIRA ticket not found | "Could not find ticket `<ID>` in JIRA. Check: `https://stitchai.atlassian.net/browse/<ID>` — if the ticket doesn't exist, rename your branch and try again." |
+| JIRA ticket not found | "Could not find ticket `<ID>` in JIRA. Check: `<browse URL>` — if the ticket doesn't exist, rename your branch and try again." |
 | JIRA API error | "JIRA API error: `<details>`. Check your credentials in `config.toml`." |
+| JIRA auth failure (401) | "JIRA authentication failed (401): check email and API token." |
+| GitHub repo not found | "GitHub repository `<repo>` not found. Check the x-mcp-repo header in your .mcp.json configuration." |
 | GitHub API error | "GitHub CLI error: `<details>`. Check `gh auth status`." |
 | Lock held | "An operation is already in progress for `<TICKET-ID>`. Try again later." |
 | `set`/`refresh` without `init` | "No knowledge file found for `<TICKET-ID>`. Run `memgen__init` first." |
-| Claude CLI failure | "Claude CLI failed during summarization: `<stderr output>`. Check that `claude` is working." |
+| Legacy `.md` file exists | "Knowledge file `<TICKET-ID>` has legacy .md format; please re-run init to convert to YAML." |
+| Unknown scope | "Unknown scope `<scope>`: valid scopes are jira, pr, git, comments, notes." |
 
 ---
 
@@ -461,50 +519,57 @@ Refresh knowledge with latest data from JIRA and GitHub.
 memgen/
   cmd/
     memgen/
-      main.go              # Entry point, startup validation, config loading
+      main.go              # Entry point, startup validation (gh CLI), config loading
   internal/
     config/
       config.go            # TOML config parsing, validation, defaults
     server/
-      server.go            # HTTP server, MCP protocol handling
-      middleware.go         # Header extraction (x-mcp-repo)
+      server.go            # HTTP/MCP server setup, tool registration with schemas, header extraction
     tools/
+      tools.go             # Deps struct, shared helpers (lockKey, extractTicket, githubClient)
       init.go              # memgen__init implementation
-      get.go               # memgen__get implementation
-      set.go               # memgen__set implementation
-      refresh.go           # memgen__refresh implementation
+      get.go               # memgen__get implementation (with scope filtering)
+      set.go               # memgen__set implementation (note append)
+      refresh.go           # memgen__refresh implementation (full re-fetch, preserve notes)
     ticket/
-      detect.go            # Branch -> ticket ID extraction & JIRA validation
+      detect.go            # Branch -> ticket ID extraction, JIRA browse URL helper
     sources/
-      jira.go              # JIRA REST API client
-      github.go            # gh CLI wrappers for PRs, commits, reviews
+      jira.go              # JIRA REST API client (ticket + comments, HTML stripping, ADF extraction)
+      github.go            # gh CLI wrappers (PRs with filtering, reviews, comments, commits, GraphQL resolved status)
     knowledge/
-      store.go             # Knowledge file read/write, path resolution
-      lock.go              # Per-ticket concurrency lock
-    claude/
-      cli.go               # Claude CLI invocation (init, merge, refresh prompts)
+      types.go             # YAML struct definitions (KnowledgeFile, JIRASection, PullRequest, PRComment, Note, etc.)
+      convert.go           # Source-to-YAML conversion (FromSources, convertJIRA, convertPRs, convertCommits)
+      store.go             # Knowledge file read/write, path resolution, scoped reads, staleness check, legacy .md detection
+      lock.go              # Per-ticket non-blocking TryLock concurrency
   commands/
-    kg.md                  # /kg slash command
-    ks.md                  # /ks slash command
+    kg.md                  # /kg slash command (supports scope via $ARGUMENTS)
+    ks.md                  # /ks slash command (supports note body via $ARGUMENTS)
     kr.md                  # /kr slash command
+  spec/
+    v1-initial.md          # This specification
+    v2-yaml-storage.md     # YAML storage migration spec
+  testdata/                # JSON fixtures for JIRA and GitHub API mocks
   config.sample.toml       # Sample config file
+  Dockerfile               # Multi-stage Docker build (Go builder + debian-slim with gh CLI)
+  docker-compose.yml       # Docker Compose with volume mounts for gh/memgen config
   go.mod
   go.sum
   README.md
-  .mcp.json.example        # Example MCP config for Claude Code
+  CLAUDE.md                # Developer guide for AI agents
+  .mcp.json                # MCP config for Claude Code
 ```
 
 ---
 
 ## 12. Build & Run
 
-### Build
+### Build (native)
 
 ```bash
 go build -o memgen ./cmd/memgen
 ```
 
-### Run
+### Run (native)
 
 ```bash
 ./memgen
@@ -512,38 +577,70 @@ go build -o memgen ./cmd/memgen
 
 On first run, creates `~/.config/memgen/` and `config.toml` with sample values, then exits prompting the user to configure.
 
-On subsequent runs with valid config, validates dependencies and starts the HTTP server.
+On subsequent runs with valid config, validates `gh` CLI and starts the HTTP server.
 
-### README
+### Docker Build & Run
 
-The README must include:
-- What MemGen is and why it exists (1-2 paragraphs).
-- Prerequisites: Go 1.22+, `claude` CLI (authenticated), `gh` CLI (authenticated).
-- Build instructions.
-- Configuration guide (TOML fields explained).
-- How to connect from Claude Code (`.mcp.json` example).
-- How to install slash commands (copy `commands/*.md` to `.claude/commands/`).
-- Usage examples for each tool.
+```bash
+# Build and start
+docker compose up -d --build
+
+# View logs
+docker compose logs -f memgen
+```
+
+The `docker-compose.yml` mounts:
+- Host `gh` CLI auth (`~/.config/gh`) as read-only.
+- Host memgen config and knowledge storage (`~/.config/memgen`).
+- Runs as the host user (`UID`/`GID` environment variables).
+
+The `Dockerfile` uses a multi-stage build:
+1. **Builder stage**: `golang:latest`, builds the `memgen` binary with `CGO_ENABLED=0`.
+2. **Runtime stage**: `debian:bookworm-slim` with `gh` CLI installed.
+
+### Test
+
+```bash
+# Run all unit tests
+go test ./...
+
+# Run tests verbose
+go test -v ./...
+
+# Run integration tests
+go test -tags=integration ./...
+
+# Run a single package's tests
+go test ./internal/tools/...
+```
+
+### Prerequisites
+
+- Go 1.25+ (for building from source).
+- `gh` CLI (installed and authenticated via `gh auth login`).
+- JIRA Cloud account with API token.
 
 ---
 
 ## 13. Implementation Constraints
 
-- **Language**: Go. Single binary. No external runtime dependencies beyond `claude` and `gh` CLIs.
-- **Database**: Filesystem `.md` files only. No SQLite, no Postgres, no Redis.
+- **Language**: Go. Single binary. No external runtime dependencies beyond the `gh` CLI.
+- **Database**: Filesystem `.yaml` files only. No SQLite, no Postgres, no Redis.
+- **Storage format**: YAML via `gopkg.in/yaml.v3`. Structured Go types marshaled/unmarshaled directly.
 - **OS**: Linux only. Hardcode `~/.config/memgen/` path.
 - **Auth**: None. Do not implement authentication.
 - **TLS**: None. HTTP only.
-- **Model**: All Claude CLI calls use `claude-opus-4-6` with high effort.
+- **No LLM dependency**: Knowledge files are assembled by Go code, not by an LLM. The `claude` CLI is not used at runtime.
 - **Timestamps**: UTC only, everywhere. When consuming JIRA/GitHub timestamps, convert to UTC. When storing, store UTC. When displaying, display UTC.
-- **Config format**: TOML only.
-- **Go MCP library**: Use the official `github.com/mark3labs/mcp-go` library (or equivalent well-maintained Go MCP library) for MCP protocol handling. Do not hand-roll the MCP protocol.
+- **Config format**: TOML only (`github.com/BurntSushi/toml`).
+- **Go MCP library**: `github.com/mark3labs/mcp-go` for MCP protocol handling (streamable HTTP transport). Do not hand-roll the MCP protocol.
+- **Container support**: Dockerfile and docker-compose.yml for containerized deployment.
 
 ---
 
 ## 14. Testing Requirements
 
-**Test coverage is mandatory.** Every package must have meaningful test coverage. Tests are not optional or deferred — they are part of the implementation. A feature is not complete until its tests pass.
+**Test coverage is mandatory.** Every package must have meaningful test coverage. Tests are not optional or deferred -- they are part of the implementation. A feature is not complete until its tests pass.
 
 ### Testing Strategy
 
@@ -554,17 +651,18 @@ Every package in `internal/` must have corresponding `_test.go` files.
 | Package | What to Test |
 |---------|-------------|
 | `config` | TOML parsing: valid config, missing fields, placeholder detection, malformed TOML, missing file, directory creation logic. |
-| `ticket` | Branch-to-ticket extraction: standard patterns, bare ticket, no match, multiple matches (first wins), edge cases (lowercase, special chars). JIRA validation: successful lookup, 404 response, API error, timeout. |
-| `knowledge/store` | File read/write, path resolution from repo+ticket, missing directory creation, file-not-found behavior, correct UTF-8 handling. |
+| `ticket` | Branch-to-ticket extraction: standard patterns, bare ticket, no match, multiple matches (first wins), edge cases (lowercase, special chars). Browse URL generation. |
+| `knowledge/store` | YAML file read/write, path resolution from repo+ticket, missing directory creation, file-not-found behavior, scoped section reads (jira, pr, git, comments, notes), staleness check, legacy `.md` detection, nil slice initialization after unmarshal. |
 | `knowledge/lock` | Lock acquisition, non-blocking tryLock returns immediately when held, lock release, concurrent access from multiple goroutines. |
-| `sources/jira` | JIRA API response parsing: ticket details, comments, empty comments, pagination if applicable. Error cases: auth failure, network error, malformed JSON. Use `httptest.Server` to mock JIRA API responses. |
-| `sources/github` | `gh` CLI command construction: correct arguments for PR search, commit search, review comments. Parse `gh` JSON output. Test with mock command execution (inject a test executor instead of calling real `gh`). |
-| `claude/cli` | Command construction: correct flags (`--model`, `--print`, etc.), stdin piping. Test with mock command execution. Verify prompts contain required instructions for init/set/refresh/merge scenarios. |
-| `tools/init` | Full init flow with mocked sources and mocked Claude CLI. Verify: lock acquired, sources fetched, Claude invoked, file written, lock released. Error propagation when JIRA fails, when GitHub fails, when Claude fails. |
-| `tools/get` | File exists: returns content + staleness info. File missing: returns init recommendation. Staleness threshold calculation. |
-| `tools/set` | File exists: reads old, invokes Claude merge, writes result. File missing: returns error. Lock contention: returns "try again later." Deduplication: Claude reports no changes. |
-| `tools/refresh` | Timestamp-based filtering of new data. Merge with existing knowledge. No new data case. File missing case. |
-| `server` | MCP protocol handling: valid tool calls, missing headers, missing arguments, unknown tools. Header extraction middleware. |
+| `knowledge/types` | YAML marshal/unmarshal round-trip for all struct types. Verify field tags produce expected YAML keys. Empty/nil slice handling. |
+| `knowledge/convert` | `FromSources()` with full data, nil JIRA, empty PR slices, nil commit slices. Verify all fields map correctly from source types to knowledge types. |
+| `sources/jira` | JIRA API response parsing: ticket details, comments, empty comments, HTML stripping, ADF text extraction. Error cases: auth failure (401), not found (404), network error, malformed JSON. Use `httptest.Server` to mock JIRA API responses. |
+| `sources/github` | `gh` CLI command construction: correct arguments for PR search, commit search, review comments. Parse `gh` JSON output. PR filtering by ticket ID (`filterPREntriesByTicket`). Commit filtering by ticket ID. GraphQL resolved status fetch with fallback. Test with mock command execution (inject a test executor). |
+| `tools/init` | Full init flow with mocked sources. Verify: lock acquired, sources fetched, YAML file written with correct struct fields, lock released. Error propagation when JIRA fails, when GitHub fails. |
+| `tools/get` | File exists: returns YAML content + staleness info. File missing: returns init recommendation. Scope filtering: each scope returns correct section. |
+| `tools/set` | File exists: reads YAML, appends note, writes back. File missing: returns error. Lock contention: returns "try again later." Verify note has UTC timestamp. |
+| `tools/refresh` | Full re-fetch with mocked sources. Notes preserved after refresh. File missing case returns error. |
+| `server` | MCP tool registration: verify all 4 tools registered with correct schemas. Tool dispatch: valid calls, missing headers, missing arguments. Scope parameter handling for get. Note/decisions backward compatibility for set. |
 
 #### Integration Tests
 
@@ -573,23 +671,23 @@ Place in `internal/integration/` or as build-tagged files (`//go:build integrati
 | Test | What It Covers |
 |------|---------------|
 | Config round-trip | Write TOML, load it, verify all fields populated. |
-| Knowledge file lifecycle | `init` -> `get` -> `set` -> `get` -> `refresh` -> `get` full cycle using mocked external sources but real file I/O. |
-| Concurrent lock behavior | Multiple goroutines attempting `init` and `set` on the same ticket simultaneously — verify only one proceeds, others get "try again later." |
+| Knowledge file lifecycle | `init` -> `get` -> `set` -> `get` -> `refresh` -> `get` full cycle using mocked external sources but real file I/O. Verify YAML structure at each step. |
+| Concurrent lock behavior | Multiple goroutines attempting `init` and `set` on the same ticket simultaneously -- verify only one proceeds, others get "try again later." |
 | HTTP server end-to-end | Start real HTTP server, send MCP requests with headers and arguments, verify correct tool dispatch and response format. |
 
 #### What to Mock
 
 - **JIRA API**: Use `httptest.NewServer` to return canned JSON responses. Never call real JIRA in tests.
-- **`gh` CLI**: Inject a command executor interface. In tests, provide a mock that returns canned stdout/stderr. Never call real `gh` in tests.
-- **`claude` CLI**: Same as `gh` — inject a command executor interface with canned responses. Never call real `claude` in tests.
-- **Filesystem** (optional): Unit tests for knowledge store can use `os.MkdirTemp` for isolated temporary directories. Clean up with `t.Cleanup`.
+- **`gh` CLI**: Inject a `sources.CommandExecutor` interface. In tests, provide a mock that returns canned stdout/stderr. Never call real `gh` in tests.
+- **Filesystem**: Unit tests for knowledge store use `os.MkdirTemp` for isolated temporary directories. Clean up with `t.Cleanup`.
 
 #### Test Conventions
 
 - Use table-driven tests where multiple inputs map to expected outputs.
 - Use `t.Parallel()` where tests are independent.
-- Use `testdata/` directories for fixture files (sample JIRA responses, knowledge files, etc.).
-- Test error messages — verify they contain the expected actionable information (ticket ID, URLs, instructions).
+- Use `testdata/` directories for fixture files (sample JIRA responses, GitHub API responses, etc.).
+- Test error messages -- verify they contain the expected actionable information (ticket ID, URLs, instructions).
+- Verify YAML struct fields directly (not string matching) where possible.
 - No test should depend on network access, installed CLIs, or external state.
 - Run all tests with `go test ./...`. Integration tests gated behind `//go:build integration` tag, run with `go test -tags=integration ./...`.
 
@@ -601,8 +699,9 @@ Place in `internal/integration/` or as build-tagged files (`//go:build integrati
 - TLS termination
 - Multi-user support
 - Web UI / dashboard
-- Persistent process management (systemd, Docker) — user runs the binary directly
+- Systemd service management
 - Windows / macOS server support
 - Rate limiting
 - Metrics / observability
 - Data encryption at rest
+- LLM-based summarization (knowledge is structured data, not LLM output)

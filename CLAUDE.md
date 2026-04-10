@@ -77,4 +77,4 @@ Before committing, use the JetBrains MCP `get_file_problems` tool (with `errorsO
 
 ## Spec
 
-See `initial-plan.md` for the full technical specification.
+See `spec/v1-initial.md` for the full technical specification and `spec/v2-yaml-storage.md` for the YAML migration details.
